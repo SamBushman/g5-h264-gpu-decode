@@ -886,8 +886,25 @@ static int is_diag_phase(int h, int v) {
  * Reset once per decode_to_frame() call (see there) since FFmpeg's frame
  * pool can in principle recycle a buffer address across different decode
  * runs - never observed to matter within one run's own small reference
- * set, but cheap to close off entirely rather than assume. */
-#define MC_REFTEX_MAX 4
+ * set, but cheap to close off entirely rather than assume.
+ *
+ * Item 10 fixes, round 2 (2026-08-28): grown from 4 to 16, empirically
+ * tuned on a real 40-frame continuous run (DEBUG_GPU_PROFILE). Real measured
+ * cause of resolve_mc_pending's per-call cost growing over a longer run
+ * (~7ms/call early -> ~27ms/call by frame ~30, see the plan's "Item 10
+ * fixes, round 1" write-up): deeper-GOP frames genuinely reference 5+
+ * distinct pictures (already documented project-wide), and eviction here is
+ * plain round-robin, not LRU - once a frame touches more than MC_REFTEX_MAX
+ * distinct references, any of them can get evicted and then immediately
+ * miss again on its very next use, forcing a full reference-frame texture
+ * re-upload (`w*h` floats, ~3.7MB for this content's 480x480 luma plane)
+ * instead of a cache hit. Measured 4->8->16->32 directly: 8 roughly halved
+ * resolve_mc_pending's total cost (13786ms->6689ms over the 40-frame run),
+ * 16 nearly halved it again (6689ms->4294ms), 32 plateaued (4237ms, within
+ * noise of 16) - 16 already covers this content's real working set, 32
+ * buys nothing. Cheap either way (this struct is tiny per slot), but no
+ * reason to keep the unused headroom. */
+#define MC_REFTEX_MAX 16
 static struct {
     const unsigned char *ptr;
     int w, h, stride;

@@ -1164,40 +1164,49 @@ static const char *fs_mc_batch_var =
 "  gl_FragColor = vec4(result/255.0, 0.0, 0.0, 1.0);\n"
 "}\n";
 
-/* ---- diagonal-family batch: fs_diag_stage1/stage2 (M7's quirk-#14 fix,
- * generalized in gpu-mc-singlepass-test phase 4c) extended from one fixed
- * block to many, each in its own fixed-16-wide lane (blockIdx =
- * floor(col/16)) - same per-block (pel_x,pel_y,hPhase,vPhase) lookup
- * texture layout as the single-pass batch above, just indexed differently
- * since this family keeps fixed-width lanes rather than colInfoTex. Every
- * line of the actual filter math is unchanged from the already-verified
- * fs_diag_stage1/fs_diag_stage2. ---- */
-static const char *fs_diag_stage1_batch =
+/* fs_diag_stage1_batch/fs_diag_stage2_batch (M7's original quirk-#14
+ * two-pass fix) removed 2026-08-28 - superseded by fs_diag_singlepass_batch
+ * below (git history has the removed source if ever needed again). This
+ * single-pass replacement removes the old FBO round trip entirely. Built after
+ * precision-boundary-probe proved this ALU is true FP32 (not FP24 -
+ * quirk #14's original premise), then diag-singlepass-verify directly
+ * compared this exact formula against 5 real captured diagonal-phase
+ * cases: it beat the two-pass shader against the TRUE (real FFmpeg,
+ * unrounded-intermediate) reference by ~9x fewer mismatched pixels
+ * (14/1280 vs. 132/1280, both worst-case off-by-1 - ordinary floor/round
+ * boundary noise, not precision loss). The two-pass split was solving a
+ * problem that didn't exist on real hardware - see plan.md's "Precision
+ * question (§4): SETTLED" and "workaround removed" entries. Keeps the
+ * horizontal 6-tap sum as a raw, unrounded value in a shader register
+ * (tap6raw) instead of routing it through an intermediate texture -
+ * matches this project's own CPU-side hv_lowpass_wh algorithm exactly,
+ * one draw call instead of two, no FBO involved at all (so quirk #16's
+ * FBO-resize-corruption concern, which motivated MC_DIAG_FBO_MAXW below,
+ * no longer applies to this path either - not yet exploited to raise the
+ * chunk cap, kept at the same 256 for this change). */
+static const char *fs_diag_singlepass_batch =
 "uniform sampler2DRect refTex;\n"
 "uniform sampler2DRect blockInfoTex;\n"
-"void main() {\n"
-"  float col = floor(gl_FragCoord.x);\n"
-"  float rowr = floor(gl_FragCoord.y);\n"
-"  float blockIdx = floor(col / 16.0);\n"
-"  float localX = col - blockIdx * 16.0;\n"
-"  vec4 info = texture2DRect(blockInfoTex, vec2(blockIdx + 0.5, 0.5));\n"
-"  vec2 b = vec2(info.r + localX + 0.5, info.g - 2.0 + rowr + 0.5);\n"
+"float clip255(float v) { return max(0.0, min(255.0, v)); }\n"
+"float tap6raw(vec2 b) {\n"
 "  float a2=texture2DRect(refTex,b+vec2(-2.0,0.0)).r*255.0;\n"
 "  float a1=texture2DRect(refTex,b+vec2(-1.0,0.0)).r*255.0;\n"
 "  float a0=texture2DRect(refTex,b+vec2( 0.0,0.0)).r*255.0;\n"
 "  float a3=texture2DRect(refTex,b+vec2( 1.0,0.0)).r*255.0;\n"
 "  float a4=texture2DRect(refTex,b+vec2( 2.0,0.0)).r*255.0;\n"
 "  float a5=texture2DRect(refTex,b+vec2( 3.0,0.0)).r*255.0;\n"
-"  float raw = (a0+a3)*20.0 - (a1+a4)*5.0 + (a2+a5);\n"
-"  gl_FragColor = vec4(floor((raw+16.0)/32.0), 0.0, 0.0, 1.0);\n"
-"}\n";
-
-static const char *fs_diag_stage2_batch =
-"uniform sampler2DRect stage1Tex;\n"
-"uniform sampler2DRect refTex;\n"
-"uniform sampler2DRect blockInfoTex;\n"
-"float clip255(float v) { return max(0.0, min(255.0, v)); }\n"
-"float dec(vec2 b, float dy) { return texture2DRect(stage1Tex, b+vec2(0.0,dy)).r; }\n"
+"  return (a0+a3)*20.0-(a1+a4)*5.0+(a2+a5);\n"
+"}\n"
+"float diagExact(vec2 b) {\n"
+"  float hm2=tap6raw(b+vec2(0.0,-2.0));\n"
+"  float hm1=tap6raw(b+vec2(0.0,-1.0));\n"
+"  float h0 =tap6raw(b+vec2(0.0, 0.0));\n"
+"  float h1 =tap6raw(b+vec2(0.0, 1.0));\n"
+"  float h2 =tap6raw(b+vec2(0.0, 2.0));\n"
+"  float h3 =tap6raw(b+vec2(0.0, 3.0));\n"
+"  float v = (h0+h1)*20.0 - (hm1+h2)*5.0 + (hm2+h3);\n"
+"  return clip255(floor((v+512.0)/1024.0));\n"
+"}\n"
 "float halfH(vec2 b) {\n"
 "  float a2=texture2DRect(refTex,b+vec2(-2.0,0.0)).r*255.0;\n"
 "  float a1=texture2DRect(refTex,b+vec2(-1.0,0.0)).r*255.0;\n"
@@ -1225,24 +1234,18 @@ static const char *fs_diag_stage2_batch =
 "  float localX = col - blockIdx * 16.0;\n"
 "  vec4 info = texture2DRect(blockInfoTex, vec2(blockIdx + 0.5, 0.5));\n"
 "  float hPhase = info.b, vPhase = info.a;\n"
-"  vec2 b = vec2(blockIdx*16.0 + localX + 0.5, rowr + 2.5);\n"
-"  float hm2=dec(b,-2.0); float hm1=dec(b,-1.0); float h0=dec(b,0.0);\n"
-"  float h1=dec(b,1.0);   float h2=dec(b,2.0);    float h3=dec(b,3.0);\n"
-"  float v = (h0+h1)*20.0 - (hm1+h2)*5.0 + (hm2+h3);\n"
-"  float diag = clip255(floor((v+16.0)/32.0));\n"
-"  vec2 rb = vec2(info.r + localX + 0.5, info.g + rowr + 0.5);\n"
-"  float halfH0 = halfH(rb);\n"
-"  float halfH1 = halfH(rb + vec2(0.0,1.0));\n"
-"  float halfV0 = halfV(rb);\n"
-"  float halfV1 = halfV(rb + vec2(1.0,0.0));\n"
+"  vec2 b = vec2(info.r + localX + 0.5, info.g + rowr + 0.5);\n"
+"  float diag = diagExact(b);\n"
 "  float result = diag;\n"
 "  if (hPhase == 2.0 && vPhase == 2.0) {\n"
 "    result = diag;\n"
 "  } else if (hPhase == 2.0) {\n"
-"    float hOp = halfH0; if (vPhase == 3.0) hOp = halfH1;\n"
+"    float ro = (vPhase == 3.0) ? 1.0 : 0.0;\n"
+"    float hOp = halfH(b + vec2(0.0, ro));\n"
 "    result = floor((hOp + diag + 1.0) / 2.0);\n"
 "  } else {\n"
-"    float vOp = halfV0; if (hPhase == 3.0) vOp = halfV1;\n"
+"    float co = (hPhase == 3.0) ? 1.0 : 0.0;\n"
+"    float vOp = halfV(b + vec2(co, 0.0));\n"
 "    result = floor((vOp + diag + 1.0) / 2.0);\n"
 "  }\n"
 "  gl_FragColor = vec4(result/255.0, 0.0, 0.0, 1.0);\n"
@@ -1379,42 +1382,27 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
     int diagprof = prof_on();
     if (diagprof) { gettimeofday(&_d0, NULL); getrusage(RUSAGE_SELF, &_e0); g_prof_diag_n++; }
     GLuint refTex = reftex_lookup_or_upload(ref_y, ref_stride, g_mc_frame_w, g_mc_frame_h);
-    static GLuint blockInfoTex = 0, s1Tex = 0, fbo = 0;
-    static GLhandleARB progA = 0, progB = 0;
-    static GLint locA_refTex = -1, locA_blockInfoTex = -1;
-    static GLint locB_stage1Tex = -1, locB_refTex = -1, locB_blockInfoTex = -1;
-    if (!progA) {
-        progA = linkp(vs_plain, fs_diag_stage1_batch);
-        locA_refTex = glGetUniformLocationARB(progA, "refTex");
-        locA_blockInfoTex = glGetUniformLocationARB(progA, "blockInfoTex");
-    }
-    if (!progB) {
-        progB = linkp(vs_plain, fs_diag_stage2_batch);
-        locB_stage1Tex = glGetUniformLocationARB(progB, "stage1Tex");
-        locB_refTex = glGetUniformLocationARB(progB, "refTex");
-        locB_blockInfoTex = glGetUniformLocationARB(progB, "blockInfoTex");
+    static GLuint blockInfoTex = 0;
+    static GLhandleARB prog = 0;
+    static GLint loc_refTex = -1, loc_blockInfoTex = -1;
+    if (!prog) {
+        prog = linkp(vs_plain, fs_diag_singlepass_batch);
+        loc_refTex = glGetUniformLocationARB(prog, "refTex");
+        loc_blockInfoTex = glGetUniformLocationARB(prog, "blockInfoTex");
     }
     if (!blockInfoTex) {
         glGenTextures(1, &blockInfoTex); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
         glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
-    if (!s1Tex) {
-        /* Allocated ONCE, fixed size - see this function's own comment on
-         * the repeated-resize corruption bug this avoids. Every dispatch
-         * below renders into a sub-viewport of this same fixed texture. */
-        glGenTextures(1, &s1Tex); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, s1Tex);
-        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA_FLOAT32_ATI, MC_DIAG_FBO_MAXW, 21, 0, GL_RGBA, GL_FLOAT, NULL);
-        glGenFramebuffersEXT(1, &fbo); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
-        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_RECTANGLE_ARB, s1Tex, 0);
-        GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
-        if (status != GL_FRAMEBUFFER_COMPLETE_EXT) fprintf(stderr, "mc diag stage1 FBO incomplete: 0x%x\n", status);
-    }
 
     static float blockinfo[MC_PENDING_MAX * 4];
     static unsigned char pixels[MC_BATCH_MAXW * 16 * 4];
+    /* MC_DIAG_FBO_MAXW/256 kept as the chunk-size default even though the
+     * FBO it was originally sized for (quirk #16's repeated-resize
+     * corruption bug) is gone now that this path renders straight to the
+     * default framebuffer - not yet raised to MC_BATCH_MAXW, see this
+     * function's single-pass comment above. */
     int maxBlocksPerChunk = getenv("MC_DIAG_CHUNKN") ? atoi(getenv("MC_DIAG_CHUNKN")) : (MC_DIAG_FBO_MAXW / 16);
 
     int start = 0;
@@ -1431,98 +1419,23 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
         glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA_FLOAT32_ATI, cnt, 1, 0, GL_RGBA, GL_FLOAT, blockinfo);
         checkgl("mc diag blockinfo upload");
 
-        /* Stage 1: horizontal 6-tap, rounded but unclamped, into the FBO
-         * texture allocated once above - quirk #14's real fix (M7), reused
-         * verbatim. Renders into columns [0,vw) of that fixed-size
-         * texture; vw is capped at MC_DIAG_FBO_MAXW by maxBlocksPerChunk,
-         * and the texture itself is never resized again (see this
-         * function's own comment on why). */
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
-        glViewport(0, 0, vw, 21);
-        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, vw, 0, 21, -1, 1);
-        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-        glUseProgramObjectARB(progA);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, refTex);
-        glUniform1iARB(locA_refTex, 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
-        glUniform1iARB(locA_blockInfoTex, 1);
-        glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
-        glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,21); glVertex2f(0,21); glEnd();
-        /* Item 9 investigation (2026-08-28): no glFinish() here (there used
-         * to be one). Stage2 below samples s1Tex, which this draw just
-         * rendered into via FBO - same GL context, same command stream, so
-         * the GPU's own in-order command execution already guarantees
-         * stage1 completes before stage2's draw call runs; an explicit
-         * CPU-side wait here was never load-bearing for correctness, only
-         * ever useful for the (separate, still-synchronous)
-         * DEBUG_MC_DIAG_STAGE1 readback path below, which keeps its own.
-         * Verified byte-exact unchanged after removing this (TARGET_FRAME
-         * 0-4), and cuts one full sync round trip per diag chunk. */
-        checkgl("mc diag stage1 draw");
-
-        if (getenv("DEBUG_MC_DIAG_STAGE1")) {
-            static GLhandleARB passProg = 0;
-            if (!passProg) passProg = linkp(vs_plain,
-                "uniform sampler2DRect stage1Tex;\n"
-                "float clip255(float v){return max(0.0,min(255.0,v));}\n"
-                "void main(){ float v = texture2DRect(stage1Tex, floor(gl_FragCoord.xy)+vec2(0.5,0.5)).r;\n"
-                "  gl_FragColor = vec4(clip255(v)/255.0,0.0,0.0,1.0); }\n");
-            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
-            glViewport(0, 0, vw, 21);
-            glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, vw, 0, 21, -1, 1);
-            glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-            glUseProgramObjectARB(passProg);
-            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, s1Tex);
-            glUniform1iARB(glGetUniformLocationARB(passProg, "stage1Tex"), 0);
-            glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
-            glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,21); glVertex2f(0,21); glEnd();
-            glFinish(); checkgl("mc diag stage1 passthrough");
-            static unsigned char s1pix[MC_BATCH_MAXW * 21 * 4];
-            glReadPixels(0, 0, vw, 21, GL_RGBA, GL_UNSIGNED_BYTE, s1pix);
-            fprintf(stderr, "stage1 dump vw=%d cnt=%d:\n", vw, cnt);
-            for (int lane = 0; lane < cnt; lane++) {
-                McReq *lr = reqs[start+lane];
-                fprintf(stderr, "  lane%d pel=(%d,%d): rows0-4 col0 (gpu/cpu): ", lane, lr->pel_x, lr->pel_y);
-                for (int rr = 0; rr < 5; rr++) {
-                    int px = (rr*vw + lane*16 + 0) * 4;
-                    /* CPU expected value: stage1 row rr represents source
-                     * row (rr-2) relative to the block, column 0. */
-                    const unsigned char *s = lr->ref_y + (lr->pel_y + rr - 2) * lr->ref_linesize + lr->pel_x;
-                    int raw = (s[0]+s[1])*20 - (s[-1]+s[2])*5 + (s[-2]+s[3]);
-                    int cpu_v = (raw + 16) >> 5;
-                    fprintf(stderr, "%d/%d ", s1pix[px], cpu_v);
-                }
-                fprintf(stderr, "\n");
-            }
-        }
-
-        /* Stage 2: vertical 6-tap over stage1's rounded intermediate, plus
-         * (for the 4 combinator phases) a fresh halfH/halfV straight from
-         * refTex - same choice 4c's test made, not a "smarter" reuse of
-         * stage1. Back to the Pbuffer's own default framebuffer. */
+        /* Single pass, straight to the Pbuffer's own default framebuffer -
+         * no FBO, no intermediate texture, no second draw call. */
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
         glViewport(0, 0, vw, 16);
         glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, vw, 0, 16, -1, 1);
         glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-        glUseProgramObjectARB(progB);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, s1Tex);
-        glUniform1iARB(locB_stage1Tex, 0);
-        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, refTex);
-        glUniform1iARB(locB_refTex, 1);
-        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
-        glUniform1iARB(locB_blockInfoTex, 2);
+        glUseProgramObjectARB(prog);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, refTex);
+        glUniform1iARB(loc_refTex, 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
+        glUniform1iARB(loc_blockInfoTex, 1);
         glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
         glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,16); glVertex2f(0,16); glEnd();
-        /* Item 9 follow-up (2026-08-28): no glFinish() here - same
-         * rationale as gpu_lumadc_batch's comment (the glReadPixels right
-         * below already provides the real sync this call needs). Distinct
-         * from the ALREADY-removed stage1->stage2 glFinish() above (a
-         * draw->draw boundary, removed earlier this session) - this one is
-         * the draw->readback boundary at the very end of the whole diag
-         * dispatch. DEBUG_MC_DIAG_STAGE1's own passthrough readback (above,
-         * gated behind that env var) intentionally keeps its own
-         * glFinish() - it's debug-only tooling, not this hot path. */
-        checkgl("mc diag stage2 draw");
+        /* No glFinish() here - matches every other hot-path dispatch in
+         * this file post-item-9 (the glReadPixels right below is the real
+         * sync point). */
+        checkgl("mc diag singlepass draw");
 
         glReadPixels(0, 0, vw, 16, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         if (getenv("DEBUG_MC_DIAG_VERIFY")) {

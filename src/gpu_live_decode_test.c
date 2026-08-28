@@ -430,7 +430,18 @@ static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
     glUniform1iARB(loc_qmulTex,1);
     glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS); glVertex2f(0,0);glVertex2f(w,0);glVertex2f(w,4);glVertex2f(0,4); glEnd();
-    glFinish(); checkgl("lumadc batch draw");
+    /* Item 9 follow-up (2026-08-28): no glFinish() here - a real, measured
+     * win on a synthetic probe (fence_pipeline_probe.c, "variant B": 30-65%
+     * less wall time, same/lower CPU, across repeated runs) for exactly
+     * this shape - a glFinish() immediately followed by a glReadPixels()
+     * that already blocks on the same data. The explicit stall was pure
+     * overhead beyond what the readback's own implicit sync provides;
+     * removing it is safe on this driver (same conclusion the diag stage1
+     * ->stage2 glFinish() removal reached earlier this session, now
+     * confirmed to generalize to a draw->readback boundary, not just a
+     * draw->draw one). checkgl() stays - it's a cheap client-side
+     * glGetError() poll, not a synchronization point. */
+    checkgl("lumadc batch draw");
     static unsigned char px[LUMADC_BATCH_MAX * 4 * 4 * 4];
     glReadPixels(0,0,w,4,GL_RGBA,GL_UNSIGNED_BYTE,px);
     for (int b = 0; b < n; b++)
@@ -528,7 +539,16 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     glUniform1iARB(loc_coeffTex,0);
     glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS); glVertex2f(0,0);glVertex2f(w,0);glVertex2f(w,4);glVertex2f(0,4); glEnd();
-    glFinish(); checkgl("idct batch draw");
+    /* Item 9 follow-up (2026-08-28): no glFinish() here - see gpu_lumadc_
+     * batch's matching comment above for the measured rationale. Note for
+     * anyone reading DEBUG_GPU_PROFILE output after this change: the
+     * "draw" phase timer below no longer captures real wait time (checkgl()
+     * is a cheap client-side poll, not a sync point) - that cost has simply
+     * moved into the "read" phase timer, which now covers the actual
+     * glReadPixels-driven wait. Total (draw+read) is the number that still
+     * means what it used to; the draw/read split itself is no longer
+     * meaningful post-this-change. */
+    checkgl("idct batch draw");
     if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
         g_prof_ib_draw_ms += prof_ms(&_ib0, &_ib1); g_prof_ib_draw_cpu_ms += cpu_ms(&_ic0, &_ic1);
         _ib0 = _ib1; _ic0 = _ic1; }
@@ -1308,7 +1328,12 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
         glUniform1iARB(loc_colInfoTex, 2);
         glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
         glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,16); glVertex2f(0,16); glEnd();
-        glFinish(); checkgl("mc singlepass batch draw");
+        /* Item 9 follow-up (2026-08-28): no glFinish() here - see
+         * gpu_lumadc_batch's comment for the measured rationale, and
+         * gpu_idct_batch's for the profiling-semantics note (applies here
+         * too: draw-phase timing below no longer reflects real wait time,
+         * that cost moved into the read-phase timer). */
+        checkgl("mc singlepass batch draw");
         if (prof) { gettimeofday(&_t1, NULL); getrusage(RUSAGE_SELF, &_u1);
             g_prof_sp_draw_ms += prof_ms(&_t0, &_t1); g_prof_sp_draw_cpu_ms += cpu_ms(&_u0, &_u1);
             _t0 = _t1; _u0 = _u1; }
@@ -1488,7 +1513,16 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
         glUniform1iARB(locB_blockInfoTex, 2);
         glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
         glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,16); glVertex2f(0,16); glEnd();
-        glFinish(); checkgl("mc diag stage2 draw");
+        /* Item 9 follow-up (2026-08-28): no glFinish() here - same
+         * rationale as gpu_lumadc_batch's comment (the glReadPixels right
+         * below already provides the real sync this call needs). Distinct
+         * from the ALREADY-removed stage1->stage2 glFinish() above (a
+         * draw->draw boundary, removed earlier this session) - this one is
+         * the draw->readback boundary at the very end of the whole diag
+         * dispatch. DEBUG_MC_DIAG_STAGE1's own passthrough readback (above,
+         * gated behind that env var) intentionally keeps its own
+         * glFinish() - it's debug-only tooling, not this hot path. */
+        checkgl("mc diag stage2 draw");
 
         glReadPixels(0, 0, vw, 16, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         if (getenv("DEBUG_MC_DIAG_VERIFY")) {

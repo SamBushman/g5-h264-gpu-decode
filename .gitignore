@@ -37,3 +37,4 @@ testdata/bbb_360_10s.mp4
 testdata/bbb_360_10s_5mb.mp4
 testdata/first_frame.ppm
 finish-probe
+fence-pipeline-probe

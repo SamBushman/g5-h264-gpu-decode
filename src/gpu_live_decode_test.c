@@ -146,6 +146,12 @@ static double g_prof_sp_pack_ms = 0, g_prof_sp_pack_cpu_ms = 0;
 static double g_prof_sp_upload_ms = 0, g_prof_sp_upload_cpu_ms = 0;
 static double g_prof_sp_draw_ms = 0, g_prof_sp_draw_cpu_ms = 0;
 static double g_prof_sp_read_ms = 0, g_prof_sp_read_cpu_ms = 0;
+/* Same 4-way breakdown for gpu_idct_batch, now the largest single site
+ * (802ms/40-frame run) after the reftex fix. */
+static double g_prof_ib_pack_ms = 0, g_prof_ib_pack_cpu_ms = 0;
+static double g_prof_ib_upload_ms = 0, g_prof_ib_upload_cpu_ms = 0;
+static double g_prof_ib_draw_ms = 0, g_prof_ib_draw_cpu_ms = 0;
+static double g_prof_ib_read_ms = 0, g_prof_ib_read_cpu_ms = 0;
 static double cpu_ms(struct rusage *a, struct rusage *b) {
     double au = a->ru_utime.tv_sec * 1000.0 + a->ru_utime.tv_usec / 1000.0;
     double as_ = a->ru_stime.tv_sec * 1000.0 + a->ru_stime.tv_usec / 1000.0;
@@ -481,6 +487,11 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
             rgba[texel*4] = (float)coeffs16[b][i];
             rgba[texel*4+1] = rgba[texel*4+2] = 0; rgba[texel*4+3] = 1;
         }
+    struct timeval _ib0, _ib1; struct rusage _ic0, _ic1;
+    int ibprof = prof_on();
+    if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
+        g_prof_ib_pack_ms += prof_ms(&_p0, &_ib1); g_prof_ib_pack_cpu_ms += cpu_ms(&_r0, &_ic1);
+        _ib0 = _ib1; _ic0 = _ic1; }
     static GLuint tex = 0;
     if (!tex) {
         glGenTextures(1,&tex); glBindTexture(GL_TEXTURE_RECTANGLE_ARB,tex);
@@ -490,6 +501,9 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB,tex);
     }
     glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA_FLOAT32_ATI,w,4,0,GL_RGBA,GL_FLOAT,rgba);
+    if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
+        g_prof_ib_upload_ms += prof_ms(&_ib0, &_ib1); g_prof_ib_upload_cpu_ms += cpu_ms(&_ic0, &_ic1);
+        _ib0 = _ib1; _ic0 = _ic1; }
     static GLhandleARB prog = 0;
     static GLint loc_coeffTex = -1;
     if (!prog) { prog = linkp(vs_plain, fs_idct_batch); loc_coeffTex = glGetUniformLocationARB(prog, "coeffTex"); }
@@ -499,8 +513,13 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS); glVertex2f(0,0);glVertex2f(w,0);glVertex2f(w,4);glVertex2f(0,4); glEnd();
     glFinish(); checkgl("idct batch draw");
+    if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
+        g_prof_ib_draw_ms += prof_ms(&_ib0, &_ib1); g_prof_ib_draw_cpu_ms += cpu_ms(&_ic0, &_ic1);
+        _ib0 = _ib1; _ic0 = _ic1; }
     static unsigned char px[IDCT_BATCH_MAX * 4 * 4 * 4];
     glReadPixels(0,0,w,4,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
+        g_prof_ib_read_ms += prof_ms(&_ib0, &_ib1); g_prof_ib_read_cpu_ms += cpu_ms(&_ic0, &_ic1); }
     for (int b = 0; b < n; b++)
         for (int row = 0; row < 4; row++)
             for (int col = 0; col < 4; col++) {
@@ -2347,6 +2366,8 @@ static AVFrame *decode_to_frame(Mp4Movie *mov, unsigned char *avcc, int alen, in
     g_prof_sp_pack_ms = g_prof_sp_pack_cpu_ms = g_prof_sp_upload_ms = g_prof_sp_upload_cpu_ms = 0;
     g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0;
     g_prof_diag_ms = g_prof_diag_cpu_ms = 0; g_prof_diag_n = g_prof_diag_chunks = 0;
+    g_prof_ib_pack_ms = g_prof_ib_pack_cpu_ms = g_prof_ib_upload_ms = g_prof_ib_upload_cpu_ms = 0;
+    g_prof_ib_draw_ms = g_prof_ib_draw_cpu_ms = g_prof_ib_read_ms = g_prof_ib_read_cpu_ms = 0;
     g_prof_reftex_hit_ms = g_prof_reftex_hit_cpu_ms = g_prof_reftex_miss_ms = g_prof_reftex_miss_cpu_ms = 0;
     g_prof_reftex_hit_n = g_prof_reftex_miss_n = 0;
     g_prof_lumadc_n = g_prof_idct_n = g_prof_mc_n = g_prof_flush_n = 0;
@@ -2436,6 +2457,8 @@ static int decode_multi(Mp4Movie *mov, unsigned char *avcc, int alen, int hook_l
     g_prof_sp_pack_ms = g_prof_sp_pack_cpu_ms = g_prof_sp_upload_ms = g_prof_sp_upload_cpu_ms = 0;
     g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0;
     g_prof_diag_ms = g_prof_diag_cpu_ms = 0; g_prof_diag_n = g_prof_diag_chunks = 0;
+    g_prof_ib_pack_ms = g_prof_ib_pack_cpu_ms = g_prof_ib_upload_ms = g_prof_ib_upload_cpu_ms = 0;
+    g_prof_ib_draw_ms = g_prof_ib_draw_cpu_ms = g_prof_ib_read_ms = g_prof_ib_read_cpu_ms = 0;
     g_prof_reftex_hit_ms = g_prof_reftex_hit_cpu_ms = g_prof_reftex_miss_ms = g_prof_reftex_miss_cpu_ms = 0;
     g_prof_reftex_hit_n = g_prof_reftex_miss_n = 0;
     g_prof_lumadc_n = g_prof_idct_n = g_prof_mc_n = g_prof_flush_n = 0;
@@ -2573,6 +2596,14 @@ int main(int argc, char **argv) {
                    g_prof_reftex_hit_n ? g_prof_reftex_hit_ms/g_prof_reftex_hit_n : 0.0,
                    g_prof_reftex_miss_n, g_prof_reftex_miss_ms, g_prof_reftex_miss_cpu_ms,
                    g_prof_reftex_miss_n ? g_prof_reftex_miss_ms/g_prof_reftex_miss_n : 0.0);
+            printf("  IDCT batch phase breakdown: pack wall=%.1fms cpu=%.1fms (%.0f%%); "
+                   "upload wall=%.1fms cpu=%.1fms (%.0f%%); "
+                   "draw+finish wall=%.1fms cpu=%.1fms (%.0f%%); "
+                   "readback+unpack wall=%.1fms cpu=%.1fms (%.0f%%)\n",
+                   g_prof_ib_pack_ms, g_prof_ib_pack_cpu_ms, g_prof_ib_pack_ms ? 100.0*g_prof_ib_pack_cpu_ms/g_prof_ib_pack_ms : 0.0,
+                   g_prof_ib_upload_ms, g_prof_ib_upload_cpu_ms, g_prof_ib_upload_ms ? 100.0*g_prof_ib_upload_cpu_ms/g_prof_ib_upload_ms : 0.0,
+                   g_prof_ib_draw_ms, g_prof_ib_draw_cpu_ms, g_prof_ib_draw_ms ? 100.0*g_prof_ib_draw_cpu_ms/g_prof_ib_draw_ms : 0.0,
+                   g_prof_ib_read_ms, g_prof_ib_read_cpu_ms, g_prof_ib_read_ms ? 100.0*g_prof_ib_read_cpu_ms/g_prof_ib_read_ms : 0.0);
         }
 
         printf("Multi-frame continuous decode: CPU-only reference, %d frames...\n", n);

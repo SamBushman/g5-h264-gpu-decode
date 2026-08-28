@@ -1181,9 +1181,10 @@ static const char *fs_mc_batch_var =
  * (tap6raw) instead of routing it through an intermediate texture -
  * matches this project's own CPU-side hv_lowpass_wh algorithm exactly,
  * one draw call instead of two, no FBO involved at all (so quirk #16's
- * FBO-resize-corruption concern, which motivated MC_DIAG_FBO_MAXW below,
- * no longer applies to this path either - not yet exploited to raise the
- * chunk cap, kept at the same 256 for this change). */
+ * FBO-resize-corruption concern no longer applies to this path - the
+ * chunk cap was raised from 256 to MC_BATCH_MAXW/4096 the same day this
+ * landed, once that stopped being a constraint - see
+ * dispatch_diag_group's own comment). */
 static const char *fs_diag_singlepass_batch =
 "uniform sampler2DRect refTex;\n"
 "uniform sampler2DRect blockInfoTex;\n"
@@ -1355,25 +1356,27 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
     }
 }
 
-/* Real driver quirk found integrating this (not in the ATI_RADEON_X1900_
- * TIGER_DRIVER_QUIRKS catalog, and distinct from quirk #15): FBO-attached
- * render-target rendering has its own width limit around 256px -
- * independent of GL_MAX_TEXTURE_SIZE=4096 (which only bounds a texture's
- * SAMPLED use, already probed and confirmed fine at that size elsewhere in
- * this project) - AND, worse, repeatedly re-sizing an FBO's attached
- * texture via glTexImage2D to a NEW width on every call progressively
- * corrupts rendering at ever-smaller widths (found via a standalone probe,
- * `fbo_width_probe.c`/`fbo_width_probe2.c`: a texture resized 16->32->40->
- * 44...->256 across successive calls broke starting around col 32-40, while
- * the exact same widths tested fresh-process-per-width, or against a
- * texture allocated ONCE at a fixed size and only re-VIEWPORTed smaller,
- * were perfect up to 256 every time). Fix: allocate s1Tex/fbo ONCE at a
- * fixed MC_DIAG_FBO_MAXW and never glTexImage2D it again - only the
- * glViewport/quad extent varies per dispatch - and cap this family's own
- * chunk size so vw never exceeds that fixed width. Candidate for a new
- * quirk entry (#16?) in the ati-x1900-driver-quirks skill if the user
- * wants to contribute it back - not done automatically. */
-#define MC_DIAG_FBO_MAXW 256
+/* Real driver quirk found integrating the ORIGINAL two-pass diagonal-MC
+ * shader (not in the ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS catalog, and
+ * distinct from quirk #15) - kept here as a standing warning for any
+ * FUTURE FBO work in this file, even though the specific path that hit it
+ * (dispatch_diag_group's old FBO-based stage1) was removed 2026-08-28:
+ * FBO-attached render-target rendering has its own width limit around
+ * 256px - independent of GL_MAX_TEXTURE_SIZE=4096 (which only bounds a
+ * texture's SAMPLED use, already probed and confirmed fine at that size
+ * elsewhere in this project) - AND, worse, repeatedly re-sizing an FBO's
+ * attached texture via glTexImage2D to a NEW width on every call
+ * progressively corrupts rendering at ever-smaller widths (found via a
+ * standalone probe, `fbo_width_probe.c`/`fbo_width_probe2.c`: a texture
+ * resized 16->32->40->44...->256 across successive calls broke starting
+ * around col 32-40, while the exact same widths tested fresh-process-per-
+ * width, or against a texture allocated ONCE at a fixed size and only
+ * re-VIEWPORTed smaller, were perfect up to 256 every time). Fix for any
+ * future FBO here: allocate it ONCE at a fixed width and never
+ * glTexImage2D it again - only the glViewport/quad extent should vary per
+ * dispatch. Candidate for a new quirk entry (#16?) in the
+ * ati-x1900-driver-quirks skill if the user wants to contribute it back -
+ * not done automatically. */
 
 static double g_prof_diag_ms = 0, g_prof_diag_cpu_ms = 0;
 static int g_prof_diag_n = 0, g_prof_diag_chunks = 0;
@@ -1398,12 +1401,15 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
 
     static float blockinfo[MC_PENDING_MAX * 4];
     static unsigned char pixels[MC_BATCH_MAXW * 16 * 4];
-    /* MC_DIAG_FBO_MAXW/256 kept as the chunk-size default even though the
-     * FBO it was originally sized for (quirk #16's repeated-resize
-     * corruption bug) is gone now that this path renders straight to the
-     * default framebuffer - not yet raised to MC_BATCH_MAXW, see this
-     * function's single-pass comment above. */
-    int maxBlocksPerChunk = getenv("MC_DIAG_CHUNKN") ? atoi(getenv("MC_DIAG_CHUNKN")) : (MC_DIAG_FBO_MAXW / 16);
+    /* Raised 2026-08-28 from MC_DIAG_FBO_MAXW (256) to MC_BATCH_MAXW (4096):
+     * that old, smaller cap existed only because of the now-removed FBO's
+     * repeated-resize corruption bug (quirk #16) - this path renders
+     * straight to the default framebuffer now, same as
+     * dispatch_singlepass_group, which already proved MC_BATCH_MAXW-wide
+     * viewports safe on this driver/Pbuffer. pixels[] above is already
+     * sized for the full MC_BATCH_MAXW width, so no buffer-size change
+     * needed here, only the chunk-size cap. */
+    int maxBlocksPerChunk = getenv("MC_DIAG_CHUNKN") ? atoi(getenv("MC_DIAG_CHUNKN")) : (MC_BATCH_MAXW / 16);
 
     int start = 0;
     while (start < n) {
@@ -2653,7 +2659,7 @@ int main(int argc, char **argv) {
                    g_prof_sp_upload_ms, g_prof_sp_upload_cpu_ms, g_prof_sp_upload_ms ? 100.0*g_prof_sp_upload_cpu_ms/g_prof_sp_upload_ms : 0.0,
                    g_prof_sp_draw_ms, g_prof_sp_draw_cpu_ms, g_prof_sp_draw_ms ? 100.0*g_prof_sp_draw_cpu_ms/g_prof_sp_draw_ms : 0.0,
                    g_prof_sp_read_ms, g_prof_sp_read_cpu_ms, g_prof_sp_read_ms ? 100.0*g_prof_sp_read_cpu_ms/g_prof_sp_read_ms : 0.0);
-            printf("  MC diag-family total: %d resolve_mc_pending calls used it, %d chunks (MC_DIAG_FBO_MAXW=256 cap), "
+            printf("  MC diag-family total: %d resolve_mc_pending calls used it, %d chunks (MC_BATCH_MAXW cap), "
                    "wall=%.1fms cpu=%.1fms (%.0f%%), %.2fms/chunk\n",
                    g_prof_diag_n, g_prof_diag_chunks, g_prof_diag_ms, g_prof_diag_cpu_ms,
                    g_prof_diag_ms ? 100.0*g_prof_diag_cpu_ms/g_prof_diag_ms : 0.0,

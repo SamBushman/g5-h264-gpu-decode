@@ -301,6 +301,24 @@ static const char *fs_lumadc_batch =
  * integer encoding gpu_lumadc already uses (`biased=result+32768`,
  * `hi=floor(biased/256)`, `lo=biased-hi*256`) - a full ±32768 range, safely
  * covering any real per-pixel residual. */
+/* Coefficient texture switched 2026-08-28 from GL_RGBA_FLOAT32_ATI (4
+ * floats/texel, only .r ever used) to GL_LUMINANCE_FLOAT32_ATI + a fixed
+ * signed-bias encoding (1 float/texel, quarter the upload payload) - the
+ * same trick that gave reftex_lookup_or_upload a real 28x speedup (item 9
+ * investigation), previously tried here too and REVERTED after a severe
+ * regression (GL_LUMINANCE_FLOAT32_ATI doesn't preserve negative values
+ * correctly on this driver, and DCT coefficients are routinely negative,
+ * unlike reftex's non-negative pixel data). lum-float-signed-probe (new,
+ * standalone) confirmed the bug is specifically about negative VALUES:
+ * biasing every value to be non-negative before upload (+65536.0, chosen
+ * for wide margin over any real dequantized coefficient - exact-integer
+ * float32 precision holds losslessly to 2^23 per precision-boundary-probe,
+ * so this costs nothing) round-tripped 150/150 test values exactly,
+ * matching the GL_RGBA_FLOAT32_ATI control. Each texture2DRect read below
+ * subtracts the same bias back out immediately, before any further math
+ * touches the value - numerically identical to the unbiased version from
+ * that point on, including the floor()-based intermediate rounding steps
+ * further down (bias cancels exactly, not an approximation). */
 static const char *fs_idct_batch =
 "uniform sampler2DRect coeffTex;\n"
 "void main() {\n"
@@ -308,22 +326,22 @@ static const char *fs_idct_batch =
 "  float base = floor(p.x / 4.0) * 4.0;\n"
 "  float lc = p.x - base;\n"
 "  float lr = p.y;\n"
-"  float c0  = texture2DRect(coeffTex, vec2(base+0.5, 0.5)).r;\n"
-"  float c1  = texture2DRect(coeffTex, vec2(base+1.5, 0.5)).r;\n"
-"  float c2  = texture2DRect(coeffTex, vec2(base+2.5, 0.5)).r;\n"
-"  float c3  = texture2DRect(coeffTex, vec2(base+3.5, 0.5)).r;\n"
-"  float c4  = texture2DRect(coeffTex, vec2(base+0.5, 1.5)).r;\n"
-"  float c5  = texture2DRect(coeffTex, vec2(base+1.5, 1.5)).r;\n"
-"  float c6  = texture2DRect(coeffTex, vec2(base+2.5, 1.5)).r;\n"
-"  float c7  = texture2DRect(coeffTex, vec2(base+3.5, 1.5)).r;\n"
-"  float c8  = texture2DRect(coeffTex, vec2(base+0.5, 2.5)).r;\n"
-"  float c9  = texture2DRect(coeffTex, vec2(base+1.5, 2.5)).r;\n"
-"  float c10 = texture2DRect(coeffTex, vec2(base+2.5, 2.5)).r;\n"
-"  float c11 = texture2DRect(coeffTex, vec2(base+3.5, 2.5)).r;\n"
-"  float c12 = texture2DRect(coeffTex, vec2(base+0.5, 3.5)).r;\n"
-"  float c13 = texture2DRect(coeffTex, vec2(base+1.5, 3.5)).r;\n"
-"  float c14 = texture2DRect(coeffTex, vec2(base+2.5, 3.5)).r;\n"
-"  float c15 = texture2DRect(coeffTex, vec2(base+3.5, 3.5)).r;\n"
+"  float c0  = texture2DRect(coeffTex, vec2(base+0.5, 0.5)).r - 65536.0;\n"
+"  float c1  = texture2DRect(coeffTex, vec2(base+1.5, 0.5)).r - 65536.0;\n"
+"  float c2  = texture2DRect(coeffTex, vec2(base+2.5, 0.5)).r - 65536.0;\n"
+"  float c3  = texture2DRect(coeffTex, vec2(base+3.5, 0.5)).r - 65536.0;\n"
+"  float c4  = texture2DRect(coeffTex, vec2(base+0.5, 1.5)).r - 65536.0;\n"
+"  float c5  = texture2DRect(coeffTex, vec2(base+1.5, 1.5)).r - 65536.0;\n"
+"  float c6  = texture2DRect(coeffTex, vec2(base+2.5, 1.5)).r - 65536.0;\n"
+"  float c7  = texture2DRect(coeffTex, vec2(base+3.5, 1.5)).r - 65536.0;\n"
+"  float c8  = texture2DRect(coeffTex, vec2(base+0.5, 2.5)).r - 65536.0;\n"
+"  float c9  = texture2DRect(coeffTex, vec2(base+1.5, 2.5)).r - 65536.0;\n"
+"  float c10 = texture2DRect(coeffTex, vec2(base+2.5, 2.5)).r - 65536.0;\n"
+"  float c11 = texture2DRect(coeffTex, vec2(base+3.5, 2.5)).r - 65536.0;\n"
+"  float c12 = texture2DRect(coeffTex, vec2(base+0.5, 3.5)).r - 65536.0;\n"
+"  float c13 = texture2DRect(coeffTex, vec2(base+1.5, 3.5)).r - 65536.0;\n"
+"  float c14 = texture2DRect(coeffTex, vec2(base+2.5, 3.5)).r - 65536.0;\n"
+"  float c15 = texture2DRect(coeffTex, vec2(base+3.5, 3.5)).r - 65536.0;\n"
 "  float z0, z1, z2, z3;\n"
 "  float m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15;\n"
 "  z0 = c0 + c8;  z1 = c0 - c8;  z2 = floor(c4/2.0) - c12; z3 = c4 + floor(c12/2.0);\n"
@@ -461,6 +479,13 @@ static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
  * below. 40 macroblocks * 24 blocks/MB * 4 texels/block = 3840 texels
  * wide, safely under this driver's GL_MAX_TEXTURE_SIZE=4096 (M4 probe). */
 #define IDCT_BATCH_MAX (40 * 24)
+/* Signed-bias added to every coefficient before uploading to the
+ * GL_LUMINANCE_FLOAT32_ATI coefficient texture (gpu_idct_batch) so no
+ * value going in is ever negative - see that function's own comment for
+ * why. Generous margin over any real dequantized H.264 coefficient this
+ * project has ever seen; float32 holds integers exactly up to 2^23
+ * (precision-boundary-probe), so this adds zero precision cost. */
+#define IDCT_COEFF_BIAS 65536.0f
 
 /* Batched IDCT: transforms `n` independent 4x4 blocks in one draw call
  * + one readback instead of `n` separate round trips.
@@ -490,29 +515,26 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     glViewport(0, 0, w, 4);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, w, 0, 4, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    /* Item 9 fix ATTEMPTED then REVERTED (2026-08-28): tried
-     * GL_LUMINANCE_FLOAT32_ATI here (same GL_ATI_texture_float family as
-     * GL_RGBA_FLOAT32_ATI, used throughout this project, and the shader
-     * only ever reads `.r`) to quarter the upload payload, matching the
-     * reftex fix's spirit. Built clean, but caused a REAL, severe
-     * correctness regression (3.9-5.3% mismatch on frames 1-4, vs.
-     * 0.000-0.030% before) - unlike reftex's non-negative [0,255] pixel
-     * data, DCT coefficients are routinely NEGATIVE, and this driver's
-     * GL_LUMINANCE_FLOAT32_ATI implementation apparently does not
-     * preserve negative values correctly (frame 0, this content's
-     * simplest/no-negative-heavy case, stayed exact - a real, concrete
-     * clue, not just noise). A genuinely new, driver-specific quirk
-     * candidate - reverted to GL_RGBA_FLOAT32_ATI (proven correct
-     * end-to-end) rather than investigate further mid-flight; worth a
-     * dedicated follow-up (e.g. a signed-bias encoding, or confirming
-     * this quirk with a minimal standalone probe) if revisited later. */
-    static float rgba[IDCT_BATCH_MAX * 4 * 4 * 4]; /* width(chunk_n*4) * height(4) * rgba(4) */
+    /* Item 9 fix ATTEMPTED then REVERTED (2026-08-28), then RECLAIMED
+     * 2026-08-28 (same day, later session): GL_LUMINANCE_FLOAT32_ATI (1
+     * float/texel vs GL_RGBA_FLOAT32_ATI's 4, only .r was ever read)
+     * quarters the upload payload, matching reftex_lookup_or_upload's real
+     * 28x win - but a first attempt caused a severe regression (3.9-5.3%
+     * mismatch), traced to GL_LUMINANCE_FLOAT32_ATI not preserving
+     * negative values on this driver (DCT coefficients are routinely
+     * negative, unlike reftex's non-negative pixel data). Reverted then;
+     * the flagged follow-up (a signed-bias encoding) was built and
+     * verified standalone (lum-float-signed-probe, 150/150 exact
+     * round-trips across a wide signed-value sweep, matching a
+     * GL_RGBA_FLOAT32_ATI control) before landing here. See
+     * fs_idct_batch's own comment above for the exact bias value and why
+     * it costs nothing precision-wise. */
+    static float lum[IDCT_BATCH_MAX * 4 * 4]; /* width(chunk_n*4) * height(4) * 1 float/texel */
     for (int b = 0; b < chunk_n; b++)
         for (int i = 0; i < 16; i++) {
             int row = i / 4, col = i % 4;
             int texel = row * w + (b * 4 + col);
-            rgba[texel*4] = (float)coeffs16[base + b][i];
-            rgba[texel*4+1] = rgba[texel*4+2] = 0; rgba[texel*4+3] = 1;
+            lum[texel] = (float)coeffs16[base + b][i] + IDCT_COEFF_BIAS;
         }
     struct timeval _ib0, _ib1; struct rusage _ic0, _ic1;
     int ibprof = prof_on();
@@ -527,7 +549,7 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     } else {
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB,tex);
     }
-    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA_FLOAT32_ATI,w,4,0,GL_RGBA,GL_FLOAT,rgba);
+    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_LUMINANCE_FLOAT32_ATI,w,4,0,GL_LUMINANCE,GL_FLOAT,lum);
     if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
         g_prof_ib_upload_ms += prof_ms(&_ib0, &_ib1); g_prof_ib_upload_cpu_ms += cpu_ms(&_ic0, &_ic1);
         _ib0 = _ib1; _ic0 = _ic1; }

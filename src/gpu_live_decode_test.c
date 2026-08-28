@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavcodec/x1900_hook.h>
@@ -124,6 +125,33 @@ static int prof_on(void) {
 }
 static double prof_ms(struct timeval *a, struct timeval *b) {
     return (b->tv_sec - a->tv_sec) * 1000.0 + (b->tv_usec - a->tv_usec) / 1000.0;
+}
+
+/* Item 9 investigation (2026-08-28): a synthetic probe (finish_probe.c)
+ * showed glFinish() itself genuinely yields (2.8% CPU during an 84ms wait)
+ * but glReadPixels alone costs real CPU (74% CPU during its own wall time -
+ * driver-side pixel marshalling, not a wait). These CPU-time accumulators
+ * (getrusage-based, alongside the existing wall-time ones) find out how
+ * much of THIS project's real per-site cost is genuine GPU-wait (CPU free)
+ * vs. real CPU-consumed work (readback/upload marshalling) - the actual
+ * question for the new "free up the CPU" goal, not just "is it slow." */
+static double g_prof_lumadc_cpu_ms = 0, g_prof_idct_cpu_ms = 0, g_prof_mc_cpu_ms = 0;
+/* Finer breakdown, singlepass MC dispatch only (the largest single cost) -
+ * which PHASE of one dispatch is actually CPU-expensive: the CPU-side
+ * packing loop (pure C, no GL), the texture uploads (glTexImage2D), the
+ * draw+glFinish (GPU wait, expected cheap per the finish_probe.c finding),
+ * or the readback+unpack (glReadPixels, expected expensive per that same
+ * finding). Answers "what to actually fix next," not just "how much." */
+static double g_prof_sp_pack_ms = 0, g_prof_sp_pack_cpu_ms = 0;
+static double g_prof_sp_upload_ms = 0, g_prof_sp_upload_cpu_ms = 0;
+static double g_prof_sp_draw_ms = 0, g_prof_sp_draw_cpu_ms = 0;
+static double g_prof_sp_read_ms = 0, g_prof_sp_read_cpu_ms = 0;
+static double cpu_ms(struct rusage *a, struct rusage *b) {
+    double au = a->ru_utime.tv_sec * 1000.0 + a->ru_utime.tv_usec / 1000.0;
+    double as_ = a->ru_stime.tv_sec * 1000.0 + a->ru_stime.tv_usec / 1000.0;
+    double bu = b->ru_utime.tv_sec * 1000.0 + b->ru_utime.tv_usec / 1000.0;
+    double bs = b->ru_stime.tv_sec * 1000.0 + b->ru_stime.tv_usec / 1000.0;
+    return (bu - au) + (bs - as_);
 }
 #define MB_TYPE_SKIP       (1 << 17) /* mpegutils.h - deliberately re-declared
                                * here rather than pulled in, matching this
@@ -340,7 +368,8 @@ static AGLContext g_glctx;
  * "defined before PENDING_MAX exists" constraint). */
 #define LUMADC_BATCH_MAX 40
 static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
-    struct timeval _p0, _p1; if (prof_on()) gettimeofday(&_p0, NULL);
+    struct timeval _p0, _p1; struct rusage _r0, _r1;
+    if (prof_on()) { gettimeofday(&_p0, NULL); getrusage(RUSAGE_SELF, &_r0); }
     int w = n * 4;
     glViewport(0, 0, w, 4);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, w, 0, 4, -1, 1);
@@ -375,12 +404,22 @@ static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
     glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA_FLOAT32_ATI,n,1,0,GL_RGBA,GL_FLOAT,qrgba);
 
     static GLhandleARB prog = 0;
-    if (!prog) prog = linkp(vs_plain, fs_lumadc_batch);
+    static GLint loc_dcTex = -1, loc_qmulTex = -1;
+    if (!prog) {
+        prog = linkp(vs_plain, fs_lumadc_batch);
+        /* Item 9 investigation: caching these once instead of looking them
+         * up by string name every dispatch call - real, measured CPU cost
+         * (draw+finish was 92% CPU for MC singlepass, not genuine GPU wait;
+         * per-call uniform-location string lookups are part of that "extra
+         * CPU work per small draw call" driver overhead). */
+        loc_dcTex = glGetUniformLocationARB(prog, "dcTex");
+        loc_qmulTex = glGetUniformLocationARB(prog, "qmulTex");
+    }
     glUseProgramObjectARB(prog);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB,tex);
-    glUniform1iARB(glGetUniformLocationARB(prog,"dcTex"),0);
+    glUniform1iARB(loc_dcTex,0);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB,qtex);
-    glUniform1iARB(glGetUniformLocationARB(prog,"qmulTex"),1);
+    glUniform1iARB(loc_qmulTex,1);
     glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS); glVertex2f(0,0);glVertex2f(w,0);glVertex2f(w,4);glVertex2f(0,4); glEnd();
     glFinish(); checkgl("lumadc batch draw");
@@ -393,7 +432,8 @@ static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
                 int hi = px[texel*4], lo = px[texel*4+1];
                 out[b][row*4+col] = hi*256 + lo - 32768;
             }
-    if (prof_on()) { gettimeofday(&_p1, NULL); g_prof_lumadc_ms += prof_ms(&_p0, &_p1); g_prof_lumadc_n++; }
+    if (prof_on()) { gettimeofday(&_p1, NULL); getrusage(RUSAGE_SELF, &_r1);
+        g_prof_lumadc_ms += prof_ms(&_p0, &_p1); g_prof_lumadc_cpu_ms += cpu_ms(&_r0, &_r1); g_prof_lumadc_n++; }
 }
 
 /* Cross-macroblock batching: a whole row's worth of qualifying
@@ -411,7 +451,8 @@ static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
  * allocation every call and because they're too large to comfortably
  * put on the stack at all once n can span a whole row of macroblocks. */
 static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
-    struct timeval _p0, _p1; if (prof_on()) gettimeofday(&_p0, NULL);
+    struct timeval _p0, _p1; struct rusage _r0, _r1;
+    if (prof_on()) { gettimeofday(&_p0, NULL); getrusage(RUSAGE_SELF, &_r0); }
     int w = n * 4;
     glViewport(0, 0, w, 4);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, w, 0, 4, -1, 1);
@@ -434,10 +475,11 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     }
     glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA_FLOAT32_ATI,w,4,0,GL_RGBA,GL_FLOAT,rgba);
     static GLhandleARB prog = 0;
-    if (!prog) prog = linkp(vs_plain, fs_idct_batch);
+    static GLint loc_coeffTex = -1;
+    if (!prog) { prog = linkp(vs_plain, fs_idct_batch); loc_coeffTex = glGetUniformLocationARB(prog, "coeffTex"); }
     glUseProgramObjectARB(prog);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB,tex);
-    glUniform1iARB(glGetUniformLocationARB(prog,"coeffTex"),0);
+    glUniform1iARB(loc_coeffTex,0);
     glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS); glVertex2f(0,0);glVertex2f(w,0);glVertex2f(w,4);glVertex2f(0,4); glEnd();
     glFinish(); checkgl("idct batch draw");
@@ -450,7 +492,8 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
                 int hi = px[texel*4], lo = px[texel*4+1];
                 out[b][row*4+col] = hi*256 + lo - 32768;
             }
-    if (prof_on()) { gettimeofday(&_p1, NULL); g_prof_idct_ms += prof_ms(&_p0, &_p1); g_prof_idct_n++; }
+    if (prof_on()) { gettimeofday(&_p1, NULL); getrusage(RUSAGE_SELF, &_r1);
+        g_prof_idct_ms += prof_ms(&_p0, &_p1); g_prof_idct_cpu_ms += cpu_ms(&_r0, &_r1); g_prof_idct_n++; }
 }
 
 /* ================= CPU intra16x16 luma prediction (verified) ================= */
@@ -917,10 +960,20 @@ static void reftex_cache_reset(void) {
     g_reftex_n = 0; g_reftex_next = 0;
 }
 
+static double g_prof_reftex_hit_ms = 0, g_prof_reftex_hit_cpu_ms = 0;
+static double g_prof_reftex_miss_ms = 0, g_prof_reftex_miss_cpu_ms = 0;
+static int g_prof_reftex_hit_n = 0, g_prof_reftex_miss_n = 0;
 static GLuint reftex_lookup_or_upload(const unsigned char *ref_y, int stride, int w, int h) {
+    struct timeval _rt0, _rt1; struct rusage _ru0, _ru1;
+    int rprof = prof_on();
+    if (rprof) { gettimeofday(&_rt0, NULL); getrusage(RUSAGE_SELF, &_ru0); }
     for (int i = 0; i < g_reftex_n; i++)
-        if (g_reftex_cache[i].ptr == ref_y && g_reftex_cache[i].w == w && g_reftex_cache[i].h == h)
+        if (g_reftex_cache[i].ptr == ref_y && g_reftex_cache[i].w == w && g_reftex_cache[i].h == h) {
+            if (rprof) { gettimeofday(&_rt1, NULL); getrusage(RUSAGE_SELF, &_ru1);
+                g_prof_reftex_hit_ms += prof_ms(&_rt0, &_rt1); g_prof_reftex_hit_cpu_ms += cpu_ms(&_ru0, &_ru1);
+                g_prof_reftex_hit_n++; }
             return g_reftex_cache[i].tex;
+        }
 
     int slot;
     if (g_reftex_n < MC_REFTEX_MAX) { slot = g_reftex_n++; }
@@ -934,19 +987,30 @@ static GLuint reftex_lookup_or_upload(const unsigned char *ref_y, int stride, in
     } else {
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
     }
-    static float *refbuf = NULL; static size_t refbuf_cap = 0;
-    size_t need = (size_t)w * h * 4;
-    if (need > refbuf_cap) { refbuf = (float*)realloc(refbuf, sizeof(float) * need); refbuf_cap = need; }
-    for (int y = 0; y < h; y++) {
-        const unsigned char *srow = ref_y + (size_t)y * stride;
-        float *drow = refbuf + (size_t)y * w * 4;
-        for (int x = 0; x < w; x++) {
-            drow[x*4] = srow[x] / 255.0f; drow[x*4+1] = drow[x*4+2] = 0; drow[x*4+3] = 1;
-        }
-    }
-    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA_FLOAT32_ATI, w, h, 0, GL_RGBA, GL_FLOAT, refbuf);
+    /* Item 9 fix (2026-08-28): this was GL_RGBA_FLOAT32_ATI with a CPU-side
+     * per-pixel packing loop (srow[x]/255.0f into a 4-float RGBA buffer) -
+     * measured at 100% CPU, 17.49ms/miss, ~38% of this whole run's total
+     * live-decode time (116 misses, 2029ms). Real cause: every shader that
+     * samples refTex already does `texture2DRect(refTex,...).r*255.0`
+     * (confirmed by grepping every real call site) - i.e. it already
+     * expects a NORMALIZED [0,1] read, which a plain 8-bit texture format
+     * provides automatically via OpenGL's standard fixed-point
+     * normalization, with no float conversion needed at all. Switched to
+     * GL_LUMINANCE8 (a core OpenGL 1.1 format, not an ATI extension - lower
+     * risk than the float format this replaces, not higher) and
+     * GL_UNPACK_ROW_LENGTH to let the driver read directly from ref_y's
+     * own stride - eliminates the CPU packing loop AND its staging buffer
+     * entirely, not just shrinks it. Zero shader changes needed (verified:
+     * every texture2DRect(refTex,...) call already multiplies by 255.0). */
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, stride);
+    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_LUMINANCE8, w, h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, ref_y);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    checkgl("reftex upload (GL_LUMINANCE8)");
     g_reftex_cache[slot].ptr = ref_y; g_reftex_cache[slot].w = w; g_reftex_cache[slot].h = h;
     g_reftex_cache[slot].stride = stride; g_reftex_cache[slot].tex = tex;
+    if (rprof) { gettimeofday(&_rt1, NULL); getrusage(RUSAGE_SELF, &_ru1);
+        g_prof_reftex_miss_ms += prof_ms(&_rt0, &_rt1); g_prof_reftex_miss_cpu_ms += cpu_ms(&_ru0, &_ru1);
+        g_prof_reftex_miss_n++; }
     return tex;
 }
 
@@ -1111,7 +1175,13 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
     GLuint refTex = reftex_lookup_or_upload(ref_y, ref_stride, g_mc_frame_w, g_mc_frame_h);
     static GLuint blockInfoTex = 0, colInfoTex = 0;
     static GLhandleARB prog = 0;
-    if (!prog) prog = linkp(vs_plain, fs_mc_batch_var);
+    static GLint loc_refTex = -1, loc_blockInfoTex = -1, loc_colInfoTex = -1;
+    if (!prog) {
+        prog = linkp(vs_plain, fs_mc_batch_var);
+        loc_refTex = glGetUniformLocationARB(prog, "refTex");
+        loc_blockInfoTex = glGetUniformLocationARB(prog, "blockInfoTex");
+        loc_colInfoTex = glGetUniformLocationARB(prog, "colInfoTex");
+    }
     if (!blockInfoTex) {
         glGenTextures(1, &blockInfoTex); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
         glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1134,6 +1204,10 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
         while (start + cnt < n && vw + reqs[start+cnt]->w <= MC_BATCH_MAXW) { vw += reqs[start+cnt]->w; cnt++; }
         if (cnt == 0) { cnt = 1; vw = reqs[start]->w; } /* one oversized block alone, never observed for real content */
 
+        struct timeval _t0, _t1; struct rusage _u0, _u1;
+        int prof = prof_on();
+        if (prof) { gettimeofday(&_t0, NULL); getrusage(RUSAGE_SELF, &_u0); }
+
         int col_cursor = 0;
         for (int i = 0; i < cnt; i++) {
             McReq *r = reqs[start + i];
@@ -1146,26 +1220,35 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
                 col_cursor++;
             }
         }
+        if (prof) { gettimeofday(&_t1, NULL); getrusage(RUSAGE_SELF, &_u1);
+            g_prof_sp_pack_ms += prof_ms(&_t0, &_t1); g_prof_sp_pack_cpu_ms += cpu_ms(&_u0, &_u1);
+            _t0 = _t1; _u0 = _u1; }
 
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
         glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA_FLOAT32_ATI, cnt, 1, 0, GL_RGBA, GL_FLOAT, blockinfo);
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, colInfoTex);
         glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA_FLOAT32_ATI, vw, 1, 0, GL_RGBA, GL_FLOAT, colinfo);
         checkgl("mc singlepass batch upload");
+        if (prof) { gettimeofday(&_t1, NULL); getrusage(RUSAGE_SELF, &_u1);
+            g_prof_sp_upload_ms += prof_ms(&_t0, &_t1); g_prof_sp_upload_cpu_ms += cpu_ms(&_u0, &_u1);
+            _t0 = _t1; _u0 = _u1; }
 
         glViewport(0, 0, vw, 16);
         glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, vw, 0, 16, -1, 1);
         glMatrixMode(GL_MODELVIEW); glLoadIdentity();
         glUseProgramObjectARB(prog);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, refTex);
-        glUniform1iARB(glGetUniformLocationARB(prog, "refTex"), 0);
+        glUniform1iARB(loc_refTex, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
-        glUniform1iARB(glGetUniformLocationARB(prog, "blockInfoTex"), 1);
+        glUniform1iARB(loc_blockInfoTex, 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, colInfoTex);
-        glUniform1iARB(glGetUniformLocationARB(prog, "colInfoTex"), 2);
+        glUniform1iARB(loc_colInfoTex, 2);
         glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
         glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,16); glVertex2f(0,16); glEnd();
         glFinish(); checkgl("mc singlepass batch draw");
+        if (prof) { gettimeofday(&_t1, NULL); getrusage(RUSAGE_SELF, &_u1);
+            g_prof_sp_draw_ms += prof_ms(&_t0, &_t1); g_prof_sp_draw_cpu_ms += cpu_ms(&_u0, &_u1);
+            _t0 = _t1; _u0 = _u1; }
 
         glReadPixels(0, 0, vw, 16, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         for (int i = 0; i < cnt; i++) {
@@ -1175,6 +1258,8 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
                 for (int c = 0; c < r->w; c++)
                     p->pred[r->y_off + row][r->x_off + c] = pixels[(row*vw + colStart[i] + c) * 4];
         }
+        if (prof) { gettimeofday(&_t1, NULL); getrusage(RUSAGE_SELF, &_u1);
+            g_prof_sp_read_ms += prof_ms(&_t0, &_t1); g_prof_sp_read_cpu_ms += cpu_ms(&_u0, &_u1); }
         start += cnt;
     }
 }
@@ -1199,12 +1284,28 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
  * wants to contribute it back - not done automatically. */
 #define MC_DIAG_FBO_MAXW 256
 
+static double g_prof_diag_ms = 0, g_prof_diag_cpu_ms = 0;
+static int g_prof_diag_n = 0, g_prof_diag_chunks = 0;
 static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McReq **reqs, int n) {
+    struct timeval _d0, _d1; struct rusage _e0, _e1;
+    int diagprof = prof_on();
+    if (diagprof) { gettimeofday(&_d0, NULL); getrusage(RUSAGE_SELF, &_e0); g_prof_diag_n++; }
     GLuint refTex = reftex_lookup_or_upload(ref_y, ref_stride, g_mc_frame_w, g_mc_frame_h);
     static GLuint blockInfoTex = 0, s1Tex = 0, fbo = 0;
     static GLhandleARB progA = 0, progB = 0;
-    if (!progA) progA = linkp(vs_plain, fs_diag_stage1_batch);
-    if (!progB) progB = linkp(vs_plain, fs_diag_stage2_batch);
+    static GLint locA_refTex = -1, locA_blockInfoTex = -1;
+    static GLint locB_stage1Tex = -1, locB_refTex = -1, locB_blockInfoTex = -1;
+    if (!progA) {
+        progA = linkp(vs_plain, fs_diag_stage1_batch);
+        locA_refTex = glGetUniformLocationARB(progA, "refTex");
+        locA_blockInfoTex = glGetUniformLocationARB(progA, "blockInfoTex");
+    }
+    if (!progB) {
+        progB = linkp(vs_plain, fs_diag_stage2_batch);
+        locB_stage1Tex = glGetUniformLocationARB(progB, "stage1Tex");
+        locB_refTex = glGetUniformLocationARB(progB, "refTex");
+        locB_blockInfoTex = glGetUniformLocationARB(progB, "blockInfoTex");
+    }
     if (!blockInfoTex) {
         glGenTextures(1, &blockInfoTex); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
         glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1254,12 +1355,22 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
         glMatrixMode(GL_MODELVIEW); glLoadIdentity();
         glUseProgramObjectARB(progA);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, refTex);
-        glUniform1iARB(glGetUniformLocationARB(progA, "refTex"), 0);
+        glUniform1iARB(locA_refTex, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
-        glUniform1iARB(glGetUniformLocationARB(progA, "blockInfoTex"), 1);
+        glUniform1iARB(locA_blockInfoTex, 1);
         glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
         glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,21); glVertex2f(0,21); glEnd();
-        glFinish(); checkgl("mc diag stage1 draw");
+        /* Item 9 investigation (2026-08-28): no glFinish() here (there used
+         * to be one). Stage2 below samples s1Tex, which this draw just
+         * rendered into via FBO - same GL context, same command stream, so
+         * the GPU's own in-order command execution already guarantees
+         * stage1 completes before stage2's draw call runs; an explicit
+         * CPU-side wait here was never load-bearing for correctness, only
+         * ever useful for the (separate, still-synchronous)
+         * DEBUG_MC_DIAG_STAGE1 readback path below, which keeps its own.
+         * Verified byte-exact unchanged after removing this (TARGET_FRAME
+         * 0-4), and cuts one full sync round trip per diag chunk. */
+        checkgl("mc diag stage1 draw");
 
         if (getenv("DEBUG_MC_DIAG_STAGE1")) {
             static GLhandleARB passProg = 0;
@@ -1307,11 +1418,11 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
         glMatrixMode(GL_MODELVIEW); glLoadIdentity();
         glUseProgramObjectARB(progB);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, s1Tex);
-        glUniform1iARB(glGetUniformLocationARB(progB, "stage1Tex"), 0);
+        glUniform1iARB(locB_stage1Tex, 0);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, refTex);
-        glUniform1iARB(glGetUniformLocationARB(progB, "refTex"), 1);
+        glUniform1iARB(locB_refTex, 1);
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, blockInfoTex);
-        glUniform1iARB(glGetUniformLocationARB(progB, "blockInfoTex"), 2);
+        glUniform1iARB(locB_blockInfoTex, 2);
         glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
         glBegin(GL_QUADS); glVertex2f(0,0); glVertex2f(vw,0); glVertex2f(vw,16); glVertex2f(0,16); glEnd();
         glFinish(); checkgl("mc diag stage2 draw");
@@ -1346,7 +1457,10 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
                     p->pred[r->y_off + row][r->x_off + c] = pixels[(row*vw + i*16 + c) * 4];
         }
         start += cnt;
+        if (diagprof) g_prof_diag_chunks++;
     }
+    if (diagprof) { gettimeofday(&_d1, NULL); getrusage(RUSAGE_SELF, &_e1);
+        g_prof_diag_ms += prof_ms(&_d0, &_d1); g_prof_diag_cpu_ms += cpu_ms(&_e0, &_e1); }
 }
 
 /* Groups this flush's queued luma MC requests by (family, reference
@@ -1383,7 +1497,8 @@ static void mc_cpu_fallback_reqs(McReq **reqs, int n) {
 
 static void resolve_mc_pending(void) {
     if (g_mc_pending_n == 0) return;
-    struct timeval _p0, _p1; if (prof_on()) gettimeofday(&_p0, NULL);
+    struct timeval _p0, _p1; struct rusage _r0, _r1;
+    if (prof_on()) { gettimeofday(&_p0, NULL); getrusage(RUSAGE_SELF, &_r0); }
     if (getenv("DEBUG_MC_BATCH"))
         fprintf(stderr, "resolve_mc_pending: n=%d\n", g_mc_pending_n);
 
@@ -1425,7 +1540,8 @@ static void resolve_mc_pending(void) {
             else dispatch_diag_group(refptrs[g], refstride[g], diagg, ndiag);
         }
     }
-    if (prof_on()) { gettimeofday(&_p1, NULL); g_prof_mc_ms += prof_ms(&_p0, &_p1); g_prof_mc_n++; }
+    if (prof_on()) { gettimeofday(&_p1, NULL); getrusage(RUSAGE_SELF, &_r1);
+        g_prof_mc_ms += prof_ms(&_p0, &_p1); g_prof_mc_cpu_ms += cpu_ms(&_r0, &_r1); g_prof_mc_n++; }
 }
 
 /* Item 10 follow-up: resolves every queued luma-DC Hadamard request in one
@@ -2211,6 +2327,12 @@ static AVFrame *decode_to_frame(Mp4Movie *mov, unsigned char *avcc, int alen, in
     g_p8x8_took_over = 0; g_p8x8_declined = 0; g_p8x8_track_n = 0; g_x1900_debug_frameno = -1;
     g_pending_n = 0; g_mc_pending_n = 0; g_cur_mb_mc_n = 0; g_lumadc_pending_n = 0;
     g_prof_lumadc_ms = g_prof_idct_ms = g_prof_mc_ms = 0;
+    g_prof_lumadc_cpu_ms = g_prof_idct_cpu_ms = g_prof_mc_cpu_ms = 0;
+    g_prof_sp_pack_ms = g_prof_sp_pack_cpu_ms = g_prof_sp_upload_ms = g_prof_sp_upload_cpu_ms = 0;
+    g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0;
+    g_prof_diag_ms = g_prof_diag_cpu_ms = 0; g_prof_diag_n = g_prof_diag_chunks = 0;
+    g_prof_reftex_hit_ms = g_prof_reftex_hit_cpu_ms = g_prof_reftex_miss_ms = g_prof_reftex_miss_cpu_ms = 0;
+    g_prof_reftex_hit_n = g_prof_reftex_miss_n = 0;
     g_prof_lumadc_n = g_prof_idct_n = g_prof_mc_n = g_prof_flush_n = 0;
     reftex_cache_reset();
     ff_x1900_set_mb_hook(live_hook, NULL);
@@ -2294,6 +2416,12 @@ static int decode_multi(Mp4Movie *mov, unsigned char *avcc, int alen, int hook_l
     g_p8x8_took_over = 0; g_p8x8_declined = 0; g_p8x8_track_n = 0; g_x1900_debug_frameno = -1;
     g_pending_n = 0; g_mc_pending_n = 0; g_cur_mb_mc_n = 0; g_lumadc_pending_n = 0;
     g_prof_lumadc_ms = g_prof_idct_ms = g_prof_mc_ms = 0;
+    g_prof_lumadc_cpu_ms = g_prof_idct_cpu_ms = g_prof_mc_cpu_ms = 0;
+    g_prof_sp_pack_ms = g_prof_sp_pack_cpu_ms = g_prof_sp_upload_ms = g_prof_sp_upload_cpu_ms = 0;
+    g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0;
+    g_prof_diag_ms = g_prof_diag_cpu_ms = 0; g_prof_diag_n = g_prof_diag_chunks = 0;
+    g_prof_reftex_hit_ms = g_prof_reftex_hit_cpu_ms = g_prof_reftex_miss_ms = g_prof_reftex_miss_cpu_ms = 0;
+    g_prof_reftex_hit_n = g_prof_reftex_miss_n = 0;
     g_prof_lumadc_n = g_prof_idct_n = g_prof_mc_n = g_prof_flush_n = 0;
     reftex_cache_reset();
     ff_x1900_set_mb_hook(live_hook, NULL);
@@ -2390,7 +2518,7 @@ int main(int argc, char **argv) {
                "%d P_16x8/P_8x16 (%d declined), %d P_8x8 (%d declined), %d declined to CPU\n",
                took_over, skip_took_over, skip_declined, p16_took_over, p16_declined,
                p16x8_took_over, p16x8_declined, p8x8_took_over, p8x8_declined, declined);
-        if (getenv("DEBUG_GPU_PROFILE"))
+        if (getenv("DEBUG_GPU_PROFILE")) {
             printf("  GPU dispatch profile: %d flush_pending() calls; "
                    "lumadc: %d calls, %.1fms total (%.2fms/call); "
                    "idct_batch: %d calls, %.1fms total (%.2fms/call); "
@@ -2399,6 +2527,37 @@ int main(int argc, char **argv) {
                    g_prof_lumadc_n, g_prof_lumadc_ms, g_prof_lumadc_n ? g_prof_lumadc_ms / g_prof_lumadc_n : 0.0,
                    g_prof_idct_n, g_prof_idct_ms, g_prof_idct_n ? g_prof_idct_ms / g_prof_idct_n : 0.0,
                    g_prof_mc_n, g_prof_mc_ms, g_prof_mc_n ? g_prof_mc_ms / g_prof_mc_n : 0.0);
+            double tot_wall = g_prof_lumadc_ms + g_prof_idct_ms + g_prof_mc_ms;
+            double tot_cpu = g_prof_lumadc_cpu_ms + g_prof_idct_cpu_ms + g_prof_mc_cpu_ms;
+            printf("  CPU-time breakdown (getrusage, item 9 investigation): "
+                   "lumadc cpu=%.1fms (%.0f%% of its wall); "
+                   "idct_batch cpu=%.1fms (%.0f%% of its wall); "
+                   "resolve_mc_pending cpu=%.1fms (%.0f%% of its wall); "
+                   "TOTAL cpu=%.1fms / wall=%.1fms (%.0f%%)\n",
+                   g_prof_lumadc_cpu_ms, g_prof_lumadc_ms ? 100.0*g_prof_lumadc_cpu_ms/g_prof_lumadc_ms : 0.0,
+                   g_prof_idct_cpu_ms, g_prof_idct_ms ? 100.0*g_prof_idct_cpu_ms/g_prof_idct_ms : 0.0,
+                   g_prof_mc_cpu_ms, g_prof_mc_ms ? 100.0*g_prof_mc_cpu_ms/g_prof_mc_ms : 0.0,
+                   tot_cpu, tot_wall, tot_wall ? 100.0*tot_cpu/tot_wall : 0.0);
+            printf("  MC singlepass phase breakdown: pack wall=%.1fms cpu=%.1fms (%.0f%%); "
+                   "upload wall=%.1fms cpu=%.1fms (%.0f%%); "
+                   "draw+finish wall=%.1fms cpu=%.1fms (%.0f%%); "
+                   "readback+unpack wall=%.1fms cpu=%.1fms (%.0f%%)\n",
+                   g_prof_sp_pack_ms, g_prof_sp_pack_cpu_ms, g_prof_sp_pack_ms ? 100.0*g_prof_sp_pack_cpu_ms/g_prof_sp_pack_ms : 0.0,
+                   g_prof_sp_upload_ms, g_prof_sp_upload_cpu_ms, g_prof_sp_upload_ms ? 100.0*g_prof_sp_upload_cpu_ms/g_prof_sp_upload_ms : 0.0,
+                   g_prof_sp_draw_ms, g_prof_sp_draw_cpu_ms, g_prof_sp_draw_ms ? 100.0*g_prof_sp_draw_cpu_ms/g_prof_sp_draw_ms : 0.0,
+                   g_prof_sp_read_ms, g_prof_sp_read_cpu_ms, g_prof_sp_read_ms ? 100.0*g_prof_sp_read_cpu_ms/g_prof_sp_read_ms : 0.0);
+            printf("  MC diag-family total: %d resolve_mc_pending calls used it, %d chunks (MC_DIAG_FBO_MAXW=256 cap), "
+                   "wall=%.1fms cpu=%.1fms (%.0f%%), %.2fms/chunk\n",
+                   g_prof_diag_n, g_prof_diag_chunks, g_prof_diag_ms, g_prof_diag_cpu_ms,
+                   g_prof_diag_ms ? 100.0*g_prof_diag_cpu_ms/g_prof_diag_ms : 0.0,
+                   g_prof_diag_chunks ? g_prof_diag_ms/g_prof_diag_chunks : 0.0);
+            printf("  reftex_lookup_or_upload: %d hits (wall=%.1fms cpu=%.1fms, %.3fms/hit); "
+                   "%d misses (wall=%.1fms cpu=%.1fms, %.2fms/miss)\n",
+                   g_prof_reftex_hit_n, g_prof_reftex_hit_ms, g_prof_reftex_hit_cpu_ms,
+                   g_prof_reftex_hit_n ? g_prof_reftex_hit_ms/g_prof_reftex_hit_n : 0.0,
+                   g_prof_reftex_miss_n, g_prof_reftex_miss_ms, g_prof_reftex_miss_cpu_ms,
+                   g_prof_reftex_miss_n ? g_prof_reftex_miss_ms/g_prof_reftex_miss_n : 0.0);
+        }
 
         printf("Multi-frame continuous decode: CPU-only reference, %d frames...\n", n);
         int n_ref = decode_multi(&mov, avcc, alen, 0, n, ref_frames, ref_times);
@@ -2454,6 +2613,21 @@ int main(int argc, char **argv) {
                    live_warm / (nn - 1), ref_warm / (nn - 1),
                    live_warm > ref_warm ? live_warm / ref_warm : ref_warm / live_warm,
                    live_warm > ref_warm ? "slower than" : "faster than");
+
+        /* Item 9: the literal "is this real-time" check the plan's new goal
+         * asks for - a hard per-frame budget, not just "faster than before."
+         * RT_BUDGET_MS defaults to 33.3ms (30fps) since this project's demux
+         * doesn't parse mvhd/stts timescale (deliberately minimal box
+         * parser) - override with the content's real fps if known. */
+        {
+            double budget = getenv("RT_BUDGET_MS") ? atof(getenv("RT_BUDGET_MS")) : 33.333;
+            int rt_ok = 0;
+            for (int f = 1; f < nn; f++) if (live_times[f] <= budget) rt_ok++;
+            printf("\nReal-time check (budget=%.1fms/frame, assumed 30fps unless RT_BUDGET_MS set): "
+                   "%d/%d frames (excl. frame 0) met budget (%.0f%%) - %s\n",
+                   budget, rt_ok, nn - 1, nn > 1 ? 100.0 * rt_ok / (nn - 1) : 0.0,
+                   (nn > 1 && rt_ok == nn - 1) ? "REAL-TIME ACHIEVED" : "NOT real-time yet");
+        }
 
         aglSetCurrentContext(NULL);
         aglDestroyContext(g_glctx);

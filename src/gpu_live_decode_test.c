@@ -146,6 +146,10 @@ static double g_prof_sp_pack_ms = 0, g_prof_sp_pack_cpu_ms = 0;
 static double g_prof_sp_upload_ms = 0, g_prof_sp_upload_cpu_ms = 0;
 static double g_prof_sp_draw_ms = 0, g_prof_sp_draw_cpu_ms = 0;
 static double g_prof_sp_read_ms = 0, g_prof_sp_read_cpu_ms = 0;
+static int g_prof_sp_chunks = 0; /* mirrors g_prof_diag_chunks - added
+    2026-08-28 to check whether this family has the same "unnecessary
+    chunking" headroom the diag family did before its own chunk cap was
+    raised, or whether its cost is genuinely elsewhere. */
 /* Same 4-way breakdown for gpu_idct_batch, now the largest single site
  * (802ms/40-frame run) after the reftex fix. */
 static double g_prof_ib_pack_ms = 0, g_prof_ib_pack_cpu_ms = 0;
@@ -1374,6 +1378,7 @@ static void dispatch_singlepass_group(const unsigned char *ref_y, int ref_stride
         }
         if (prof) { gettimeofday(&_t1, NULL); getrusage(RUSAGE_SELF, &_u1);
             g_prof_sp_read_ms += prof_ms(&_t0, &_t1); g_prof_sp_read_cpu_ms += cpu_ms(&_u0, &_u1); }
+        if (prof) g_prof_sp_chunks++;
         start += cnt;
     }
 }
@@ -2459,7 +2464,7 @@ static AVFrame *decode_to_frame(Mp4Movie *mov, unsigned char *avcc, int alen, in
     g_prof_lumadc_ms = g_prof_idct_ms = g_prof_mc_ms = 0;
     g_prof_lumadc_cpu_ms = g_prof_idct_cpu_ms = g_prof_mc_cpu_ms = 0;
     g_prof_sp_pack_ms = g_prof_sp_pack_cpu_ms = g_prof_sp_upload_ms = g_prof_sp_upload_cpu_ms = 0;
-    g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0;
+    g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0; g_prof_sp_chunks = 0;
     g_prof_diag_ms = g_prof_diag_cpu_ms = 0; g_prof_diag_n = g_prof_diag_chunks = 0;
     g_prof_ib_pack_ms = g_prof_ib_pack_cpu_ms = g_prof_ib_upload_ms = g_prof_ib_upload_cpu_ms = 0;
     g_prof_ib_draw_ms = g_prof_ib_draw_cpu_ms = g_prof_ib_read_ms = g_prof_ib_read_cpu_ms = 0;
@@ -2551,7 +2556,7 @@ static int decode_multi(Mp4Movie *mov, unsigned char *avcc, int alen, int hook_l
     g_prof_lumadc_ms = g_prof_idct_ms = g_prof_mc_ms = 0;
     g_prof_lumadc_cpu_ms = g_prof_idct_cpu_ms = g_prof_mc_cpu_ms = 0;
     g_prof_sp_pack_ms = g_prof_sp_pack_cpu_ms = g_prof_sp_upload_ms = g_prof_sp_upload_cpu_ms = 0;
-    g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0;
+    g_prof_sp_draw_ms = g_prof_sp_draw_cpu_ms = g_prof_sp_read_ms = g_prof_sp_read_cpu_ms = 0; g_prof_sp_chunks = 0;
     g_prof_diag_ms = g_prof_diag_cpu_ms = 0; g_prof_diag_n = g_prof_diag_chunks = 0;
     g_prof_ib_pack_ms = g_prof_ib_pack_cpu_ms = g_prof_ib_upload_ms = g_prof_ib_upload_cpu_ms = 0;
     g_prof_ib_draw_ms = g_prof_ib_draw_cpu_ms = g_prof_ib_read_ms = g_prof_ib_read_cpu_ms = 0;
@@ -2676,11 +2681,12 @@ int main(int argc, char **argv) {
             printf("  MC singlepass phase breakdown: pack wall=%.1fms cpu=%.1fms (%.0f%%); "
                    "upload wall=%.1fms cpu=%.1fms (%.0f%%); "
                    "draw+finish wall=%.1fms cpu=%.1fms (%.0f%%); "
-                   "readback+unpack wall=%.1fms cpu=%.1fms (%.0f%%)\n",
+                   "readback+unpack wall=%.1fms cpu=%.1fms (%.0f%%); %d chunks\n",
                    g_prof_sp_pack_ms, g_prof_sp_pack_cpu_ms, g_prof_sp_pack_ms ? 100.0*g_prof_sp_pack_cpu_ms/g_prof_sp_pack_ms : 0.0,
                    g_prof_sp_upload_ms, g_prof_sp_upload_cpu_ms, g_prof_sp_upload_ms ? 100.0*g_prof_sp_upload_cpu_ms/g_prof_sp_upload_ms : 0.0,
                    g_prof_sp_draw_ms, g_prof_sp_draw_cpu_ms, g_prof_sp_draw_ms ? 100.0*g_prof_sp_draw_cpu_ms/g_prof_sp_draw_ms : 0.0,
-                   g_prof_sp_read_ms, g_prof_sp_read_cpu_ms, g_prof_sp_read_ms ? 100.0*g_prof_sp_read_cpu_ms/g_prof_sp_read_ms : 0.0);
+                   g_prof_sp_read_ms, g_prof_sp_read_cpu_ms, g_prof_sp_read_ms ? 100.0*g_prof_sp_read_cpu_ms/g_prof_sp_read_ms : 0.0,
+                   g_prof_sp_chunks);
             printf("  MC diag-family total: %d resolve_mc_pending calls used it, %d chunks (MC_BATCH_MAXW cap), "
                    "wall=%.1fms cpu=%.1fms (%.0f%%), %.2fms/chunk\n",
                    g_prof_diag_n, g_prof_diag_chunks, g_prof_diag_ms, g_prof_diag_cpu_ms,

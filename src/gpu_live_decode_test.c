@@ -457,6 +457,22 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     glViewport(0, 0, w, 4);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, w, 0, 4, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    /* Item 9 fix ATTEMPTED then REVERTED (2026-08-28): tried
+     * GL_LUMINANCE_FLOAT32_ATI here (same GL_ATI_texture_float family as
+     * GL_RGBA_FLOAT32_ATI, used throughout this project, and the shader
+     * only ever reads `.r`) to quarter the upload payload, matching the
+     * reftex fix's spirit. Built clean, but caused a REAL, severe
+     * correctness regression (3.9-5.3% mismatch on frames 1-4, vs.
+     * 0.000-0.030% before) - unlike reftex's non-negative [0,255] pixel
+     * data, DCT coefficients are routinely NEGATIVE, and this driver's
+     * GL_LUMINANCE_FLOAT32_ATI implementation apparently does not
+     * preserve negative values correctly (frame 0, this content's
+     * simplest/no-negative-heavy case, stayed exact - a real, concrete
+     * clue, not just noise). A genuinely new, driver-specific quirk
+     * candidate - reverted to GL_RGBA_FLOAT32_ATI (proven correct
+     * end-to-end) rather than investigate further mid-flight; worth a
+     * dedicated follow-up (e.g. a signed-bias encoding, or confirming
+     * this quirk with a minimal standalone probe) if revisited later. */
     static float rgba[IDCT_BATCH_MAX * 4 * 4 * 4]; /* width(n*4) * height(4) * rgba(4) */
     for (int b = 0; b < n; b++)
         for (int i = 0; i < 16; i++) {

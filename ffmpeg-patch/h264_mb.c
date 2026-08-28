@@ -942,6 +942,10 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
         x1900_info.mb_x = sl->mb_x;
         x1900_info.mb_y = sl->mb_y;
         x1900_info.mb_type = mb_type;
+        if (getenv("DEBUG_ANY_MB") && sl->mb_x == atoi(getenv("DEBUG_ANY_MB")) &&
+            sl->mb_y == (getenv("DEBUG_ANY_MB2") ? atoi(getenv("DEBUG_ANY_MB2")) : -999))
+            fprintf(stderr, "ANY MB(%d,%d) frameno=%d: mb_type=0x%x cbp=0x%x qscale=%d\n",
+                    sl->mb_x, sl->mb_y, g_x1900_debug_frameno, mb_type, sl->cbp, sl->qscale);
         x1900_info.qscale = sl->qscale;
         x1900_info.coeffs = sl->mb;
         x1900_info.nnz = sl->non_zero_count_cache;

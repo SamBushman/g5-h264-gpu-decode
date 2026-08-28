@@ -281,6 +281,37 @@ void ff_x1900_set_mb_hook(X1900MbHookFn fn, void *userdata);
  * one header both it and this file's own .c share. */
 int ff_x1900_call_mb_hook(const X1900MbInfo *info);
 
+/* Item 9 frame-scale restructure (2026-08-28): called from
+ * h264_slice.c's ff_h264_execute_decode_slices to decide whether to
+ * postpone this decode's deblocking (h->postpone_filter) - true only when
+ * the test harness has explicitly opted in via ff_x1900_set_postpone_wanted
+ * below (NOT simply "is a hook installed" - a real bug during this
+ * project's own verification found the harness installs the same hook
+ * object for both its "live" and CPU-only "ref" passes, so that check
+ * alone would silently postpone deblocking for the ref pass too, breaking
+ * its job as a stable, untouched baseline). See the plan's "Item 9
+ * frame-scale restructure" write-up for the full design: when postponed,
+ * intra-prediction top-context reads (both FFmpeg's own, via
+ * xchg_mb_border, and this project's own hook, via a matching change)
+ * read directly from the live (never-yet-deblocked) buffer instead of
+ * the sl->top_borders[] cache, which is never populated (backup_mb_border
+ * lives inside loop_filter, itself skipped while postponed) - safe
+ * because nothing gets deblocked prematurely to corrupt what intra
+ * prediction needs. Real FFmpeg-level finding, verified empirically
+ * (X1900_FORCE_POSTPONE + DEBUG_DUMP_REF diffing, hook fully uninstalled
+ * in both cases compared): FFmpeg's own postpone_filter mechanism
+ * (designed for nb_slice_ctx>1, multi-threaded slice decode) produces
+ * byte-identical output when forced on for the ordinary single-context
+ * case too - not a documented/intended use, but verified correct on real
+ * content before relying on it. */
+int ff_x1900_hook_installed(void);
+
+/* Called by the test harness (not h264_mb.c/h264_slice.c) whenever it
+ * changes whether the installed hook is actually live (its own g_live
+ * flag) - see ff_x1900_hook_installed's comment above for why this is
+ * a separate signal from "is a hook object installed at all". */
+void ff_x1900_set_postpone_wanted(int enable);
+
 /*
  * Milestone 8 (deblocking): called right before FFmpeg would invoke its
  * own CPU h264_v_loop_filter_luma on one real macroblock edge, with the

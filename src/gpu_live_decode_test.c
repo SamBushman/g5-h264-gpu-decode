@@ -366,13 +366,15 @@ static AGLContext g_glctx;
  * the one real generalization needed is qmul, which (unlike the single-MB
  * caller's shared uniform) can differ per macroblock via real delta QP - a
  * second n-wide/1-tall lookup texture, mirroring item 4's colInfoTex. */
-/* Must match PENDING_MAX (defined later, with a whole-row-of-macroblocks
- * derivation) - one lumadc request per intra macroblock, so it can never
- * exceed however many macroblocks a row-flush can hold. Not literally
+/* Must match PENDING_MAX (defined later - see its own item-9 comment on
+ * why it's now a whole-frame bound, not one row). Not literally
  * PENDING_MAX here since that's defined further down the file, after this
  * function (both gpu_idct_batch/IDCT_BATCH_MAX above have this same
- * "defined before PENDING_MAX exists" constraint). */
-#define LUMADC_BATCH_MAX 40
+ * "defined before PENDING_MAX exists" constraint). In practice this stays
+ * tiny regardless (the left/top-neighbor flush check forces a flush
+ * before every intra macroblock, so real batches rarely exceed 1) - sized
+ * generously anyway since it's cheap. */
+#define LUMADC_BATCH_MAX 1024
 static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
     struct timeval _p0, _p1; struct rusage _r0, _r1;
     if (prof_on()) { gettimeofday(&_p0, NULL); getrusage(RUSAGE_SELF, &_r0); }
@@ -455,11 +457,25 @@ static void gpu_lumadc_batch(int dc16[][16], int qmul[], int n, int out[][16]) {
  * per-block array. See fs_idct_batch for the packing scheme.
  * rgba/px are static (not stack) both to avoid a ~250KB/~60KB stack
  * allocation every call and because they're too large to comfortably
- * put on the stack at all once n can span a whole row of macroblocks. */
+ * put on the stack at all once n can span a whole row of macroblocks.
+ *
+ * Item 9 frame-scale restructure (2026-08-28): `n` can now span up to a
+ * whole frame's worth of blocks (up to PENDING_MAX*24, since flushing is
+ * no longer bounded to one row), which would blow well past
+ * GL_MAX_TEXTURE_SIZE=4096 in a single draw call. IDCT_BATCH_MAX now
+ * means "blocks per real GL round trip" (unchanged value, 960 - still
+ * safely under the 4096 texel-width limit at 4 texels/block), and this
+ * function chunks internally: multiple draw+readback round trips if
+ * n > IDCT_BATCH_MAX, transparent to the caller (which still just passes
+ * a big flat coeffs16/out array sized for the whole batch). MC's own
+ * dispatch functions already had this chunking (item 4/quirk #16); this
+ * is the same pattern applied here. */
 static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
+    for (int base = 0; base < n; base += IDCT_BATCH_MAX) {
+    int chunk_n = (n - base < IDCT_BATCH_MAX) ? (n - base) : IDCT_BATCH_MAX;
     struct timeval _p0, _p1; struct rusage _r0, _r1;
     if (prof_on()) { gettimeofday(&_p0, NULL); getrusage(RUSAGE_SELF, &_r0); }
-    int w = n * 4;
+    int w = chunk_n * 4;
     glViewport(0, 0, w, 4);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, w, 0, 4, -1, 1);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
@@ -479,12 +495,12 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
      * end-to-end) rather than investigate further mid-flight; worth a
      * dedicated follow-up (e.g. a signed-bias encoding, or confirming
      * this quirk with a minimal standalone probe) if revisited later. */
-    static float rgba[IDCT_BATCH_MAX * 4 * 4 * 4]; /* width(n*4) * height(4) * rgba(4) */
-    for (int b = 0; b < n; b++)
+    static float rgba[IDCT_BATCH_MAX * 4 * 4 * 4]; /* width(chunk_n*4) * height(4) * rgba(4) */
+    for (int b = 0; b < chunk_n; b++)
         for (int i = 0; i < 16; i++) {
             int row = i / 4, col = i % 4;
             int texel = row * w + (b * 4 + col);
-            rgba[texel*4] = (float)coeffs16[b][i];
+            rgba[texel*4] = (float)coeffs16[base + b][i];
             rgba[texel*4+1] = rgba[texel*4+2] = 0; rgba[texel*4+3] = 1;
         }
     struct timeval _ib0, _ib1; struct rusage _ic0, _ic1;
@@ -520,15 +536,16 @@ static void gpu_idct_batch(int coeffs16[][16], int n, int out[][16]) {
     glReadPixels(0,0,w,4,GL_RGBA,GL_UNSIGNED_BYTE,px);
     if (ibprof) { gettimeofday(&_ib1, NULL); getrusage(RUSAGE_SELF, &_ic1);
         g_prof_ib_read_ms += prof_ms(&_ib0, &_ib1); g_prof_ib_read_cpu_ms += cpu_ms(&_ic0, &_ic1); }
-    for (int b = 0; b < n; b++)
+    for (int b = 0; b < chunk_n; b++)
         for (int row = 0; row < 4; row++)
             for (int col = 0; col < 4; col++) {
                 int texel = row * w + (b * 4 + col);
                 int hi = px[texel*4], lo = px[texel*4+1];
-                out[b][row*4+col] = hi*256 + lo - 32768;
+                out[base + b][row*4+col] = hi*256 + lo - 32768;
             }
     if (prof_on()) { gettimeofday(&_p1, NULL); getrusage(RUSAGE_SELF, &_r1);
         g_prof_idct_ms += prof_ms(&_p0, &_p1); g_prof_idct_cpu_ms += cpu_ms(&_r0, &_r1); g_prof_idct_n++; }
+    } /* end chunk loop */
 }
 
 /* ================= CPU intra16x16 luma prediction (verified) ================= */
@@ -852,9 +869,20 @@ typedef struct PendingMB {
     int cpred[2][8][8];
 } PendingMB;
 
-/* One full row of this test's content (640px / 16 = 40 macroblocks)
- * fits with margin under GL_MAX_TEXTURE_SIZE=4096 (40*24*4=3840). */
-#define PENDING_MAX 40
+/* Item 9 frame-scale restructure (2026-08-28): grown from 40 (one row) to
+ * a whole-frame bound, now that deferring reconstruction across many rows
+ * is safe (deblocking is postponed for the whole frame while the hook is
+ * installed - see x1900_hook.h's ff_x1900_hook_installed comment). 1024
+ * covers this content's real 30x30=900 macroblocks/frame with headroom;
+ * the existing g_pending_n>=PENDING_MAX safety cap still applies if a
+ * future frame ever needs more (degrades to an earlier flush, not an
+ * overflow). GPU dispatch functions that batch from this queue
+ * (gpu_idct_batch, dispatch_singlepass_group, dispatch_diag_group) either
+ * already chunk internally past GL_MAX_TEXTURE_SIZE (MC's dispatchers,
+ * proven in item 4) or gained chunking as part of this same restructure
+ * (gpu_idct_batch, see its own comment) - this constant no longer needs
+ * to itself stay under the single-dispatch texture-width limit. */
+#define PENDING_MAX 1024
 static PendingMB g_pending[PENDING_MAX];
 static int g_pending_n = 0;
 static int g_pending_coeffs[PENDING_MAX * 24][16];
@@ -1502,10 +1530,16 @@ static void dispatch_diag_group(const unsigned char *ref_y, int ref_stride, McRe
  * pointer) and issues one batched dispatch per group - see this section's
  * own comment for why family needs separate shaders (quirk #14) and
  * reference needs separate texture uploads (no texture-array/indexed-
- * sampling primitive on this driver). In practice almost every flush has
- * exactly one reference pointer (this content's P-slices overwhelmingly
- * reference the immediately preceding frame). */
-#define MC_GROUP_MAX 8
+ * sampling primitive on this driver). Previously "in practice almost
+ * every flush has exactly one reference pointer" (true when a flush was
+ * only ever one row's worth of content) - item 9's frame-scale restructure
+ * (2026-08-28) means a single flush can now legitimately span a whole
+ * frame, which item 10's own profiling already showed can genuinely touch
+ * 16 distinct references (the finding behind MC_REFTEX_MAX=16) - grown to
+ * match, with headroom, since silently capping this would truncate real
+ * groups (any macroblock referencing a distinct pointer past this cap
+ * would never get grouped/dispatched at all). */
+#define MC_GROUP_MAX 32
 
 /* Diagnostic tool (kept, matching this file's established DEBUG_-env-var
  * convention): resolve a list of requests via the original CPU mc_luma_wh
@@ -1707,28 +1741,33 @@ static void flush_pending(void) {
 static void enqueue_reconstruction(const X1900MbInfo *info, int pred[16][16],
                                     int cpred[2][8][8], int is_intra,
                                     const int *luma_dc_in, int luma_dc_qmul) {
-    /* Real end-of-row flushing is proactive, in live_hook (checked for
-     * EVERY macroblock, not just ones reaching this function) - see
-     * x1900_hook.h's mb_width comment for why a reactive check here
-     * would already be too late. This is just a harmless backstop that
-     * should never actually trigger.
+    /* Item 9 frame-scale restructure (2026-08-28): removed the old
+     * "row changed" backstop flush that used to live here - under the
+     * previous per-row-only architecture it was a harmless, near-never-
+     * triggered safety net (live_hook's own end-of-row flush already
+     * guaranteed g_pending_n==0 by the time a new row's first macroblock
+     * reached this function); under the new frame-scale architecture it
+     * would trigger CONSTANTLY (the whole point is that g_pending_n now
+     * legitimately spans many rows) and would silently defeat cross-row
+     * batching entirely. The real correctness guarantee is now
+     * live_hook's own checks: flush before any intra macroblock
+     * (anywhere, any row) if backlog exists, and an unconditional flush
+     * at end-of-frame - see live_hook's own comments.
      *
-     * NOTE: the left-neighbor-pending check does NOT live here anymore -
-     * it's now solely live_hook's job (gated on IS_INTRA_MB of the CURRENT
-     * macroblock, run before dispatch). A copy here would be redundant for
-     * intra (live_hook's gate already ran, unconditionally, before this
-     * function could be reached via reconstruct_enqueue) and actively
-     * wrong for inter: an ungated check here would flush the queue on
-     * every single P_16x16 enqueue whenever back-to-back inter
+     * NOTE: the left-neighbor/top-neighbor-pending check does NOT live
+     * here - it's live_hook's job (gated on IS_INTRA_MB of the CURRENT
+     * macroblock, run before dispatch). A copy here would be redundant
+     * for intra (live_hook's gate already ran, unconditionally, before
+     * this function could be reached via reconstruct_enqueue) and
+     * actively wrong for inter: an ungated check here would flush the
+     * queue on every single P_16x16 enqueue whenever back-to-back inter
      * macroblocks are queued, defeating the entire point of gating it in
      * live_hook in the first place. Inter macroblocks never read spatial
-     * left context in this function's own body (their pred/cpred are
-     * already fully computed via MC before this is called), so they never
-     * needed this check to begin with. */
-    if (g_pending_n > 0 && g_pending[0].mb_y != info->mb_y)
-        flush_pending();
+     * context in this function's own body (their pred/cpred are already
+     * fully computed via MC before this is called), so they never needed
+     * this check to begin with. */
     if (g_pending_n >= PENDING_MAX)
-        flush_pending(); /* safety cap, shouldn't trigger for <=40-wide content */
+        flush_pending(); /* safety cap - now a real, reachable cap on frame-scale content, not just theoretical */
 
     /* ---- chroma DC transform (CPU) for both planes - residual only;
      * prediction into cpred was already done by the caller. ---- */
@@ -1855,14 +1894,33 @@ static int reconstruct_enqueue(const X1900MbInfo *info) {
     int ls = info->linesize;
     /* LEFT context: same row, not yet deblocked - safe to read live. */
     for (int i = 0; i < 16; i++) left[i] = dy[-1 + i * ls];
-    /* TOP context: row above has likely already been deblocked by the
-     * time this hook fires (real FFmpeg's own per-row decode loop runs
-     * loop_filter() before the next row starts) - reading it from the
-     * live buffer would silently use POST-deblock pixels where the spec
-     * requires PRE-deblock. Use FFmpeg's own preserved-pixel cache
-     * instead (see x1900_hook.h for the full explanation/layout). */
-    for (int i = 0; i < 16; i++) top[i] = info->top_border_here[i];
-    topleft = info->top_border_left[15];
+    /* TOP context: item 9 frame-scale restructure (2026-08-28) - reads
+     * directly from the live buffer instead of FFmpeg's preserved-pixel
+     * cache (top_border_here/left). Safe because this function is now
+     * ONLY ever reached for P-slice content (live_hook declines I-slices
+     * from GPU takeover entirely - see live_hook's own comment on the
+     * real interaction bug that made that necessary; B-slices were
+     * already always declined), and P-slices always run with deblocking
+     * POSTPONED for the whole frame while this hook is live (see
+     * ff_x1900_hook_installed's comment in x1900_hook.h) - the row above
+     * has NOT been deblocked yet, so the live buffer holds the same true
+     * pre-deblock values the cache would have, matching LEFT context
+     * above. Also correctly handles mb_x==0's "no left column" case being
+     * moot here (this whole intra path is declined for mb_x==0/mb_y==0,
+     * see live_hook). */
+    for (int i = 0; i < 16; i++) top[i] = dy[-ls + i];
+    topleft = dy[-ls - 1];
+
+    if (getenv("DEBUG_LUMA_CTX") && info->mb_x == atoi(getenv("DEBUG_LUMA_CTX")) &&
+        info->mb_y == (getenv("DEBUG_LUMA_CTX2") ? atoi(getenv("DEBUG_LUMA_CTX2")) : -999)) {
+        fprintf(stderr, "LUMA CTX MB(%d,%d) frameno=%d mode=%d mb_type=0x%x cbp=0x%x\n",
+                info->mb_x, info->mb_y, g_x1900_debug_frameno, info->intra16x16_pred_mode, info->mb_type, info->cbp);
+        fprintf(stderr, "  left: "); for (int i=0;i<16;i++) fprintf(stderr,"%d ",left[i]); fprintf(stderr,"\n");
+        fprintf(stderr, "  top:  "); for (int i=0;i<16;i++) fprintf(stderr,"%d ",top[i]); fprintf(stderr,"\n");
+        fprintf(stderr, "  topleft: %d\n", topleft);
+        fprintf(stderr, "  luma_dc: "); for (int i=0;i<16;i++) fprintf(stderr,"%d ",info->luma_dc[i]); fprintf(stderr,"\n");
+        fprintf(stderr, "  luma_dc_qmul=%d\n", info->luma_dc_qmul);
+    }
 
     int pred[16][16];
     pred16x16(info->intra16x16_pred_mode, left, top, topleft, pred);
@@ -1873,16 +1931,16 @@ static int reconstruct_enqueue(const X1900MbInfo *info) {
     /* ---- chroma prediction (spatial - intra-specific) ---- */
     uint8_t *cdest[2] = { info->dest_cb, info->dest_cr };
     int uls = info->uvlinesize;
-    int top_border_plane_off[2] = { 16, 24 };
     int cpred[2][8][8];
 
     for (int plane = 0; plane < 2; plane++) {
         uint8_t *dc = cdest[plane];
         unsigned char cleft[8], ctop[8], ctopleft;
         for (int i = 0; i < 8; i++) cleft[i] = dc[-1 + i * uls];
-        int off = top_border_plane_off[plane];
-        for (int i = 0; i < 8; i++) ctop[i] = info->top_border_here[off + i];
-        ctopleft = info->top_border_left[off + 7];
+        /* TOP context: same reasoning as luma above - this function is
+         * only ever reached for P-slice content, always postponed. */
+        for (int i = 0; i < 8; i++) ctop[i] = dc[-uls + i];
+        ctopleft = dc[-uls - 1];
 
         pred8x8(info->chroma_pred_mode, cleft, ctop, ctopleft, cpred[plane]);
 
@@ -2237,29 +2295,42 @@ static int live_hook(const X1900MbInfo *info, void *ud) {
     /* A DECLINED macroblock (the vast majority - FFmpeg's own C code
      * reconstructs it normally) reads ITS OWN neighbor context straight
      * from the live buffer, with no awareness of our pending queue at
-     * all. If its LEFT neighbor is one of our own macroblocks still
-     * sitting unflushed in the queue, FFmpeg would read wrong
+     * all. If its LEFT or TOP neighbor is one of our own macroblocks
+     * still sitting unflushed in the queue, FFmpeg would read wrong
      * (placeholder/unwritten) pixels - this dependency check has to run
      * for every macroblock, not just ones we personally take over.
-     * (TOP-neighbor risk is already covered by the end-of-row flush
-     * below: no cross-row pending state ever exists.)
      *
-     * Gated on the CURRENT macroblock being intra: only a macroblock that
-     * itself reads same-frame spatial neighbor pixels - intra, whether
-     * GPU-reconstructed or declined to FFmpeg's own intra path - actually
-     * needs its left neighbor's pixels finalized first. Skip and
-     * P_16x16(-with-residual) macroblocks read only the reference frame
-     * (already fully decoded) - motion vector prediction happened during
-     * entropy decode, before this hook ever fires - so leaving this
-     * unconditional would flush the queue on every single enqueue once
-     * P_16x16 macroblocks start queuing back-to-back, collapsing inter
-     * batching to size-1 the same way it did for intra content. */
-    if (IS_INTRA_MB(info->mb_type))
-        for (int m = 0; m < g_pending_n; m++)
-            if (g_pending[m].mb_x == info->mb_x - 1 && g_pending[m].mb_y == info->mb_y) {
-                flush_pending();
-                break;
-            }
+     * Item 9 frame-scale restructure (2026-08-28): the pending queue can
+     * now span MANY rows (deblocking is postponed for the whole frame,
+     * see ff_x1900_hook_installed's comment), so a TOP-neighbor
+     * dependency is real and no longer automatically ruled out the way
+     * it was when every row flushed unconditionally.
+     *
+     * A first version of this check simply flushed the WHOLE backlog on
+     * ANY pending content whenever an intra macroblock was seen - correct,
+     * but measured to cost real batching: P-slices in real content still
+     * carry scattered intra-refresh macroblocks (not just I-slices), and
+     * "flush everything" on every one of those left resolve_mc_pending's
+     * own call count almost unchanged from before this restructure
+     * (492 vs. 501 calls on the same 40-frame profiled run) - most of the
+     * intended cross-row batching benefit was being thrown away by this
+     * check's own over-eagerness. Narrowed to the PRECISE dependency:
+     * flush only if (a) the OLDEST pending entry is from an earlier row
+     * than this macroblock (its top-neighbor's row might still be
+     * unflushed - pending entries are always enqueued in raster order, so
+     * g_pending[0] is always the oldest/earliest), or (b) this
+     * macroblock's specific left neighbor (mb_x-1, same row) is itself
+     * still pending. Both real, both necessary; nothing else is. */
+    if (IS_INTRA_MB(info->mb_type) && g_pending_n > 0) {
+        int need_flush = (g_pending[0].mb_y < info->mb_y);
+        if (!need_flush)
+            for (int m = 0; m < g_pending_n; m++)
+                if (g_pending[m].mb_x == info->mb_x - 1 && g_pending[m].mb_y == info->mb_y) {
+                    need_flush = 1;
+                    break;
+                }
+        if (need_flush) flush_pending();
+    }
 
     if (info->mb_type & MB_TYPE_SKIP) {
         /* Inter path - no same-frame dependency, but (since item 4, phase
@@ -2318,6 +2389,43 @@ static int live_hook(const X1900MbInfo *info, void *ud) {
         } else g_p8x8_declined++;
     } else if (!(info->mb_type & MB_TYPE_INTRA16x16)) {
         g_declined++;
+    } else if (info->slice_type_nos == AV_PICTURE_TYPE_I) {
+        /* Item 9 frame-scale restructure (2026-08-28): I16x16 GPU takeover
+         * disabled for I-slices, a real, deliberate scope narrowing found
+         * necessary during this restructure - NOT a pre-existing
+         * restriction (I16x16 takeover in I-slices was proven byte-exact
+         * and has worked since early in this project). Root cause: a
+         * genuine, confirmed (isolated via a direct A/B test - reconfirmed
+         * byte-exact at 0.000% the instant I-slice takeover is disabled,
+         * REGARDLESS of whether deblocking postponement is also active)
+         * but NOT FULLY TRACED interaction where taking over an I16x16
+         * macroblock somewhere in an I-slice corrupts something that
+         * later corrupts a small number of DECLINED I4x4/I8x8
+         * macroblocks elsewhere in the SAME frame (concentrated at the
+         * frame's right edge in this content, 2 macroblocks/frame,
+         * ~0.2% of pixels) - confirmed NOT about deblocking/postponement
+         * timing (persists with postponement fully disabled for I-slices
+         * too) and NOT about this project's own flush-trigger timing
+         * (the same "flush before any intra macroblock" check already
+         * covers declined content). Suspected but unconfirmed: some
+         * FFmpeg-internal per-slice state (e.g. non_zero_count_cache
+         * staleness, matching this project's own earlier "sl->mb reused-
+         * scratch-buffer" bug class) that our hook's early return skips
+         * updating in a way real, non-hooked reconstruction implicitly
+         * relies on for a LATER macroblock's own reconstruction - not
+         * confirmed further given time spent already; a real candidate
+         * for future investigation, not a GPU/driver quirk (purely
+         * FFmpeg-internal). Accepted as the fix rather than continuing to
+         * chase the exact mechanism: I-slice GPU reconstruction was never
+         * the source of real GPU cost (item 10's dominant cost is P-slice
+         * MC dispatch) and never batched past size 1 anyway (the
+         * left/top-neighbor-pending flush check already collapsed intra
+         * content to batch-size-1, independent of this restructure) - so
+         * this costs nothing toward the real goal while fully restoring
+         * correctness. P/B-slice content (P16x16/P16x8/P8x16/P8x8/Skip
+         * above) is unaffected and is where this restructure's real
+         * frame-scale batching benefit lives. */
+        g_declined++;
     } else if (info->mb_x == 0 || info->mb_y == 0) {
         /* Edge macroblocks need real edge-availability handling
          * (DC-with-missing-neighbor variants) not implemented here -
@@ -2334,10 +2442,21 @@ static int live_hook(const X1900MbInfo *info, void *ud) {
         result = reconstruct_enqueue(info);
     }
 
-    /* Proactive end-of-row flush, checked for EVERY macroblock
-     * (declined or not) - see x1900_hook.h's mb_width comment for why
-     * this can't be a reactive "did the row change" check instead. */
-    if (info->mb_x == info->mb_width - 1)
+    /* Item 9 frame-scale restructure (2026-08-28): the old unconditional
+     * end-of-ROW flush is gone - deferring across rows is now safe (see
+     * ff_x1900_hook_installed's comment), and that per-row flush was
+     * exactly the thing standing between this project and real
+     * cross-row/frame-scale GPU dispatch batching. What remains
+     * mandatory: the end-of-FRAME flush, checked for EVERY macroblock
+     * (declined or not, matching the original comment's own reasoning for
+     * why this can't be a reactive "did mb_y change" check - by the time
+     * that would fire, on the NEXT frame's first macroblock, FFmpeg's own
+     * loop_filter catch-up for THIS frame - triggered right after
+     * decode_slice() returns, see h264_slice.c - would already have run
+     * against an incomplete buffer). Flushing here guarantees every
+     * pending macroblock's pixels are written before this hook call
+     * returns control past the frame's last macroblock. */
+    if (info->mb_x == info->mb_width - 1 && info->mb_y == info->mb_height - 1)
         flush_pending();
 
     return result;
@@ -2356,6 +2475,7 @@ static AVFrame *decode_to_frame(Mp4Movie *mov, unsigned char *avcc, int alen, in
     avcodec_open2(ctx, codec, NULL);
 
     g_live = hook_live;
+    ff_x1900_set_postpone_wanted(hook_live); /* item 9: keep the ref pass on the normal, unpostponed path - see x1900_hook.h's comment */
     g_took_over = 0; g_declined = 0; g_skip_took_over = 0; g_skip_declined = 0;
     g_p16_took_over = 0; g_p16_declined = 0;
     g_p16x8_took_over = 0; g_p16x8_declined = 0; g_p16x8_track_n = 0;
@@ -2447,6 +2567,7 @@ static int decode_multi(Mp4Movie *mov, unsigned char *avcc, int alen, int hook_l
     avcodec_open2(ctx, codec, NULL);
 
     g_live = hook_live;
+    ff_x1900_set_postpone_wanted(hook_live); /* item 9: keep the ref pass on the normal, unpostponed path - see x1900_hook.h's comment */
     g_took_over = 0; g_declined = 0; g_skip_took_over = 0; g_skip_declined = 0;
     g_p16_took_over = 0; g_p16_declined = 0;
     g_p16x8_took_over = 0; g_p16x8_declined = 0; g_p16x8_track_n = 0;
@@ -2726,6 +2847,20 @@ int main(int argc, char **argv) {
     if (!live || !ref) { fprintf(stderr, "decode failed\n"); return 1; }
     if (took_over == 0) { fprintf(stderr, "hook never took over any macroblock - nothing exercised\n"); return 1; }
 
+    /* Item 9 frame-scale restructure investigation: dump the ref (hook-
+     * uninstalled) frame's raw Y/Cb/Cr planes for direct external diffing -
+     * isolates whether FFmpeg's own declined-macroblock path is affected
+     * by X1900_FORCE_POSTPONE, independent of this project's own hook. */
+    if (getenv("DEBUG_DUMP_REF")) {
+        FILE *fp = fopen(getenv("DEBUG_DUMP_REF"), "wb");
+        if (fp) {
+            for (int r = 0; r < ref->height; r++) fwrite(ref->data[0] + r*ref->linesize[0], 1, ref->width, fp);
+            for (int r = 0; r < ref->height/2; r++) fwrite(ref->data[1] + r*ref->linesize[1], 1, ref->width/2, fp);
+            for (int r = 0; r < ref->height/2; r++) fwrite(ref->data[2] + r*ref->linesize[2], 1, ref->width/2, fp);
+            fclose(fp);
+        }
+    }
+
     if (getenv("DEBUG_SKIP")) {
         /* Skip macroblocks have no same-frame dependency (motion comp
          * reads an already-finalized reference frame), so unlike intra
@@ -2900,6 +3035,60 @@ int main(int argc, char **argv) {
     if (getenv("DEBUG_CHROMA") && max_diff_y_r >= 0)
         fprintf(stderr, "max luma diff %ld at pixel (row=%d,col=%d) -> MB(%d,%d)\n",
                 max_diff_y, max_diff_y_r, max_diff_y_c, max_diff_y_c/16, max_diff_y_r/16);
+
+    if (getenv("DEBUG_ROW_SCAN")) {
+        int mbw = (w + 15) / 16, mbh = (h + 15) / 16;
+        for (int my = 0; my < mbh; my++) {
+            long rowmis = 0;
+            for (int r = my*16; r < my*16+16 && r < h; r++)
+                for (int c = 0; c < w; c++) {
+                    int a = live->data[0][r*live->linesize[0]+c];
+                    int b = ref->data[0][r*ref->linesize[0]+c];
+                    if (abs(a-b) > 2) rowmis++;
+                }
+            fprintf(stderr, "MB row %2d: %ld luma mismatches\n", my, rowmis);
+        }
+        (void)mbw;
+        /* Which specific macroblocks (by column) have real (>2) mismatches? */
+        for (int my = 0; my < mbh; my++) {
+            for (int mx = 0; mx < mbw; mx++) {
+                long mbmis = 0; int mbmax = 0;
+                for (int r = my*16; r < my*16+16 && r < h; r++)
+                    for (int c = mx*16; c < mx*16+16 && c < w; c++) {
+                        int a = live->data[0][r*live->linesize[0]+c];
+                        int b = ref->data[0][r*ref->linesize[0]+c];
+                        int d = abs(a-b);
+                        if (d > 2) mbmis++;
+                        if (d > mbmax) mbmax = d;
+                    }
+                if (mbmis > 0)
+                    fprintf(stderr, "  MB(%d,%d): %ld px mismatch, max diff %d\n", mx, my, mbmis, mbmax);
+            }
+        }
+    }
+
+    /* Item 9 frame-scale restructure investigation: direct, frame-agnostic
+     * dump of a macroblock's own 16x16 luma block (live vs ref), bypassing
+     * the tracking-array tools above (which accumulate across every
+     * internally-decoded frame, not just the captured/target one - a
+     * real, pre-existing limitation, not something this investigation
+     * introduced, but one that made those tools unreliable for this
+     * specific check). DEBUG_EDGE_DUMP=mbx,mby. */
+    if (getenv("DEBUG_EDGE_DUMP")) {
+        int emx, emy;
+        sscanf(getenv("DEBUG_EDGE_DUMP"), "%d,%d", &emx, &emy);
+        fprintf(stderr, "EDGE DUMP MB(%d,%d) luma live/ref:\n", emx, emy);
+        for (int r = 0; r < 16; r++) {
+            fprintf(stderr, "  row%2d: ", r);
+            for (int c = 0; c < 16; c++) {
+                int rr = emy*16+r, cc = emx*16+c;
+                int a = live->data[0][rr*live->linesize[0]+cc];
+                int b = ref->data[0][rr*ref->linesize[0]+cc];
+                fprintf(stderr, "%3d/%3d ", a, b);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
 
     long mismatches_c = 0, total_c = 0, max_diff_c = 0;
     for (int plane = 1; plane <= 2; plane++)

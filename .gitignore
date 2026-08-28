@@ -38,3 +38,5 @@ testdata/bbb_360_10s_5mb.mp4
 testdata/first_frame.ppm
 finish-probe
 fence-pipeline-probe
+mc-idct-merge-verify
+mc-idct-merge-verify-diag

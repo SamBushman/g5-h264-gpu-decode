@@ -1,0 +1,38 @@
+# Built binaries (all the standalone test programs)
+decode-test
+diag-debug
+fbo-probe
+fbo-probe-float
+fbo-width-probe
+fbo-width-probe2
+gl-probe
+gpu-colorspace-test
+gpu-deblock-test
+gpu-full-intra16-test
+gpu-idct-test
+gpu-live-decode-test
+gpu-lumadc-test
+gpu-mc-diag-fixed
+gpu-mc-quarterpel
+gpu-mc-singlepass-test
+gpu-mc-test
+gpu-mc-test2
+gpu-present-test
+hwaccel-test
+mp4-demux
+mv-survey
+precision-probe
+window-test
+
+# Vendored FFmpeg tree (131MB, mostly unmodified upstream source + build
+# artifacts) - NOT tracked wholesale. Our actual modifications are copied
+# into ffmpeg-patch/ instead (see ffmpeg-patch/README.md). The one-time
+# starting tarball is also excluded - it's a build input, not our work.
+ffmpeg-7.1.5/
+ffmpeg-7.1.5-patched.tar.gz
+
+# Large/legacy test clips - jellyfish_360.mp4 (the clip every current test
+# uses) and jellyfish.mp4 are kept; these are superseded/bulkier.
+testdata/bbb_360_10s.mp4
+testdata/bbb_360_10s_5mb.mp4
+testdata/first_frame.ppm

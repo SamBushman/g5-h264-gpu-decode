@@ -63,3 +63,27 @@ or dumped `AGLContext`/dispatch-table snapshot, which is a much larger undertaki
 kext's already-documented 6,354-line `process_command_buffer`/`write_r500_3d_blit_state_packet` decompiles
 in `stage3-scope-assessment.md`). Flagging this as the honest limit of this specific static-RE thread
 rather than continuing to guess.
+
+## Definitive confirmation, from the top of the call chain: `libGL.dylib`'s real `_glClear`
+
+Decompiled the real, public `_glClear` entry point in `libGL.dylib` (`92f28368`) - proof, not just
+inference, that the structural picture above is correct:
+```c
+void _glClear(undefined4 param_1) {
+  puVar2 = *(undefined4 **)PTR__gll_cc_a2f27020;           // thread-local "current context" cache
+  if (/* stale-cache check against the current stack address */) {
+    puVar2 = _pthread_getspecific(*(pthread_key_t *)PTR__gll_pkey_a2f2701c);
+    ...
+  }
+  (*(code *)puVar2[0xb])(*puVar2, param_1);                // indexed dispatch-table call
+}
+```
+`glClear` does a thread-local context lookup (with a cheap same-thread fast-path check, avoiding a full
+`pthread_getspecific` call when nothing changed since the last GL call - a real, sensible performance
+optimization), then calls whatever function pointer currently sits at dispatch-table slot `0xb`
+(word offset 44 from the dispatch object). This is the exact same shape for every GL entry point in
+this library, not just `glClear` - there is no way to find "the plain-clear code path" by name, because
+by design it doesn't have one; it's whichever anonymous function `_gldInitDispatch`/`_gldUpdateDispatch`
+last installed into that slot for the current GL state. This is now definitively confirmed from the
+actual call site, not just inferred from an absent symbol on the driver-bundle side - closing this
+specific question as thoroughly as static analysis alone can.

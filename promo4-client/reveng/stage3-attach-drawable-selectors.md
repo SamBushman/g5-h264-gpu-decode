@@ -57,3 +57,23 @@ empirically with reasoned-but-unconfirmed parameters and observe the real result
 meaningfully safer kind of "guess and test" than raw PM4/register writes were - external-method calls
 go through the kernel's own validated dispatch and argument-count checking, and fail safely with a real
 `IOReturn` error code on malformed input rather than risking undefined hardware behavior.
+
+## Real empirical follow-up: selector 0 confirmed real and distinct, exact parameters still unknown
+
+Ran `stage3c-attach-probe`: real context allocation (Stage 2a's proven sequence), then three real
+calls to selector 0 with reasoned-but-unconfirmed 4-dword payloads (all-zero; a guessed flags value
+`0x803f` matching a mask seen in `_gldAttachDrawable`'s own code; small guessed dimensions). **All
+three returned the identical, real `kIOReturnBadArgument` (`0xe00002c2`)** - consistent, not a crash,
+not `kIOReturnUnsupported`. This is a real, if modest, positive signal: the kernel recognized and
+validated the call specifically (rejecting the parameter values), rather than treating selector 0 as
+unimplemented - consistent with the hypothesis that selector 0 is a real, existing external method
+with real argument requirements this probe simply hasn't matched yet. A post-probe health check
+(selector 3 on the same connection) matched the pre-probe baseline exactly - the system stayed fully
+healthy throughout, confirming external-method calls really are the safer category of experiment they
+were expected to be.
+
+**Real remaining blocker**: finding the exact correct 4-dword payload requires either finding a real
+caller's concrete argument values (not available in this binary - `_gldAttachDrawable` has no internal
+callers, per the earlier finding) or decompiling the actual caller, which lives in Apple's AGL/CGL
+framework binary - a different, not-yet-touched target requiring its own Ghidra import and analysis
+pass. Not attempted this session; a genuine, well-scoped next step if this thread continues.

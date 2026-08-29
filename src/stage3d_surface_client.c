@@ -61,6 +61,18 @@ int main(void) {
     kr = IOConnectMethodScalarIStructureI(conn, kIOAccelSurfaceGetState, 0, 0, NULL);
     fprintf(stderr, "[stage3d] kIOAccelSurfaceGetState via structureI(0): %s\n", krstr(kr));
 
+    /* corrected from a real, live gdb trace of IOAccelSetSurfaceFramebufferShape's actual
+     * internal call: real structSize is 2 bytes, not the full IOAccelDeviceRegion (12 bytes)
+     * originally guessed. Real observed value in that trace was 0x0081 - try that first,
+     * then a couple of small reasoned alternatives. */
+    uint16_t shape16 = 0x0081;
+    kr = IOConnectMethodScalarIStructureI(conn, kIOAccelSurfaceSetShape, 0, sizeof(shape16), &shape16);
+    fprintf(stderr, "[stage3d] kIOAccelSurfaceSetShape (2 bytes, real observed value 0x0081): %s\n", krstr(kr));
+
+    shape16 = 0;
+    kr = IOConnectMethodScalarIStructureI(conn, kIOAccelSurfaceSetShape, 0, sizeof(shape16), &shape16);
+    fprintf(stderr, "[stage3d] kIOAccelSurfaceSetShape (2 bytes, zero): %s\n", krstr(kr));
+
     kr = IOServiceClose(conn);
     fprintf(stderr, "[stage3d] IOServiceClose: %s\n", krstr(kr));
 

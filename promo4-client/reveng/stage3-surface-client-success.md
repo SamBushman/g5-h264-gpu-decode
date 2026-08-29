@@ -45,3 +45,41 @@ direct candidate for actually establishing a real, usable surface, followed by `
 warrant the same care as every other state-changing step in this project - reasoned parameters from the
 real, documented structures (`IOAccelBounds`, `IOAccelSurfaceInformation`) rather than blind guesses,
 and real health checks before/after.
+
+## Real follow-up: SetShape's true structure size found, but a deeper real setup chain confirmed
+
+Traced `IOAccelSetSurfaceFramebufferShape`'s own internal call directly via gdb (breaking on both the
+IOAccel* convenience functions and the raw `io_connect_method_*` entry points in the same run).
+**Real, decisive finding**: `conn=0x230b` is confirmed as the real, distinct type-0 surface connection
+(separate from the main GL context's `conn=0x220f`), and the real internal call is **selector 9
+(`kIOAccelSurfaceSetShape`) with a 2-byte structure**, not the 12-byte `IOAccelDeviceRegion` originally
+guessed from the header alone.
+
+**Also decisive**: the GL context's own "attach" call (`selector 0`, 4 bytes, `conn=0x220f`) carries the
+literal value `0x0cf1eeb8` - which **exactly matches** the `uniq` argument passed into
+`IOAccelCreateSurface` in the same run. This confirms how the two connection types link together: the
+GL context "attaches" to a surface by referencing the same unique surface ID used to create it via the
+IOAccelerator API.
+
+**Real, informative negative**: retried `kIOAccelSurfaceSetShape` with the corrected 2-byte size (both
+the real observed value `0x0081` and a plain zero) on a connection opened directly via
+`IOServiceOpen(type=0)` - both still returned `kIOReturnBadArgument`. Traced further and found why: a
+**real, deeper 2-tier setup chain** happens before any per-surface call succeeds -
+`IOAccelFindAccelerator` (called twice, very early, before other setup) and `IOAccelCreateAccelID`
+(real args: display index 0, output pointer, small real constants `0x40`/`6`) establish
+accelerator-level state on a *separate* connection (`conn=0x2403`) before `IOAccelCreateSurface` ever
+opens the per-surface connection (`conn=0x230b`) that `SetShape` succeeds on in Apple's own real flow.
+A connection opened by directly matching `ATIRadeonX1000` and specifying type 0 skips this whole
+real chain - explaining the consistent `kIOReturnBadArgument` results.
+
+## Honest status, revised
+
+Getting a genuinely working surface via hand-replicated raw selector calls would mean correctly
+reproducing this entire real, multi-connection, multi-step chain (`IOAccelFindAccelerator` ->
+`IOAccelCreateAccelID` -> `IOAccelCreateSurface` -> `IOAccelSetSurfaceFramebufferShape`), each step
+still only partially understood at the raw-argument level. The cleaner, better-grounded path forward,
+now clearly indicated by this investigation rather than assumed: **link directly against the real,
+proven-callable `IOAccel*` library functions** (confirmed real and exported via every gdb trace in this
+thread) instead of continuing to hand-replicate their internal protocol - Apple's own library already
+does this real setup chain correctly; there is no need to re-derive it by hand once real prototypes are
+established for these functions.

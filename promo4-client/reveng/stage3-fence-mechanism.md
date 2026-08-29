@@ -65,6 +65,23 @@ you automatically.
 Not yet re-verified on hardware (G5 down) - this is a decompiled, internally-consistent mechanism, not
 yet cross-checked live the way the cursor/chain-link fields were.
 
+## Checked whether GL buffer objects (VBO/PBO-style) offer a simpler, independent target - they don't
+
+Decompiled `_gldCreateBuffer`/`_gldFlushBuffer`/`_gldPageoffBuffer`/`_gldDestroyBuffer` hoping the
+separate buffer-object API (`stage3-gld-plugin-api-catalog.md`) might expose a simpler memory region,
+independent of the command-buffer chain-link machinery, worth targeting instead. **Real, honest
+negative result**: it isn't independent. `_gldCreateBuffer` is a trivial 0x24-byte CPU-side bookkeeping
+struct (type/usage fields, no hardware-adjacent behavior). `_gldPageoffBuffer` (the real teardown path)
+uses the *exact same* primitives already documented above - the same `base+0x28 < cursor` check calling
+`FUN_0001a0f0`, and the same fence-tag-check-then-selector-9-wait pattern via `FUN_0001a0d0`, seen
+twice more in this one function. Also surfaces one more previously-undocumented external method,
+**selector `0xd`** (13), called during buffer-object paging-off with a 2-word structure input
+(`*puVar3`, `0`) - not yet decoded further, but confirms the fence/tag/selector-9 idiom is a real,
+consistently-reused pattern across this driver's whole surface, not a one-off. **Conclusion**: there is
+no simpler, hardware-adjacent memory region to sidestep the command-buffer/chain-link system with -
+every path this project has found funnels through the same primitives, so a future attempt needs to
+work correctly with those primitives, not around them.
+
 ## Why this matters for a future injection redesign
 
 This doesn't fix the root cause already found and fixed conceptually (`stage3g-cursor-field-

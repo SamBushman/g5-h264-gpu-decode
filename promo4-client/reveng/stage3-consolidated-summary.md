@@ -88,3 +88,33 @@ different real return convention) rather than simply wrong parameter values - a 
 still well-scoped question for continued disassembly work if this thread resumes.
 
 Health checks passed cleanly throughout; no crash at any point across every real attempt.
+
+## Real final clarification: the true remaining blocker is CGL's internal object state, not prototypes
+
+Extended the disassembly to include each call site's post-call instructions (how the caller actually
+uses the result), resolving the `0x10000003` mystery precisely. **`IOAccelCreateAccelID` is a real
+2-argument function** - the caller never even checks its r3 return value, instead reading the result
+directly back out of the memory the 2nd argument pointed to. My original 4-argument call worked anyway
+purely because the two extra, bogus arguments landed in registers the real function never reads.
+**`IOAccelFindAccelerator` is a real 3-argument function** - my original 4-argument call was genuinely
+wrong and corrupted the real call, explaining every failure. Retested with the corrected 3-argument
+prototype: `IOAccelCreateAccelID` (already fixed) continues to succeed cleanly and reliably.
+`IOAccelFindAccelerator` still fails - but now for a real, different, and more fundamental reason: its
+first argument is not a simple display index constant. The real disassembly shows it's loaded from a
+live CGL-internal object (`r29`, or `*(r29+0)` in the two real call sites examined) - a real "renderer"
+or "display" object this project's own minimal test program has no equivalent for, not fabricable
+without also replicating a meaningful slice of CGL's own internal object construction.
+
+The same pattern holds for `IOAccelCreateSurface`: every one of its first three arguments is loaded
+from a real, already-initialized internal struct (`*(r30+0x28)`, `*(r30+0x8)`, `*(r30+0x24)`) - the
+literal values observed live via gdb (`service=0x1f07`, `type=0`) are real and accurate for that
+specific run, but supplying them from a from-scratch test program without the surrounding real object
+state they were read from was not sufficient to succeed.
+
+**This is a real, honest, qualitatively different kind of remaining gap than everything found earlier
+in this investigation** - not a wrong function signature or a missing selector (both fixable with more
+disassembly), but a dependency on CGL's own internal object graph, which would mean reconstructing a
+meaningful part of the CGL implementation itself to supply real, valid inputs. This is the honest limit
+of the "call the real functions directly" technique for this session - a genuinely different, larger
+undertaking than continued prototype archaeology, consistent with (not contradicting) the "different-
+scale project" characterization from earlier in this thread.

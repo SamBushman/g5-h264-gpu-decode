@@ -21,8 +21,13 @@
 #include <string.h>
 #include <stdint.h>
 
-extern kern_return_t IOAccelFindAccelerator(int displayID, void *outA, void *outB, uint32_t size);
-extern kern_return_t IOAccelCreateAccelID(int displayID, uint32_t *outAccelID, uint32_t a3, uint32_t a4);
+/* corrected via real, exact disassembly of the call sites (not decompiler inference) - see
+ * promo4-client/reveng/stage3-consolidated-summary.md's disassembly follow-up. FindAccelerator
+ * and CreateAccelID were each called with FEWER real arguments than originally guessed; the
+ * extra, bogus arguments in the earlier attempt landed in unused registers for CreateAccelID
+ * (explaining why it worked anyway) but corrupted the real call for FindAccelerator. */
+extern kern_return_t IOAccelFindAccelerator(uint32_t param1, void *outA, void *outB);
+extern kern_return_t IOAccelCreateAccelID(uint32_t param1, uint32_t *outValue);
 extern kern_return_t IOAccelCreateSurface(uint32_t service, uint32_t uniqueID, uint32_t type, uint32_t *outSurfaceID);
 extern kern_return_t IOAccelSetSurfaceFramebufferShape(uint32_t surfaceID, void *shapePtr, uint32_t opt, uint32_t accelID);
 
@@ -30,15 +35,15 @@ int main(void) {
     unsigned char bufA[64], bufB[64];
     memset(bufA, 0, sizeof bufA);
     memset(bufB, 0, sizeof bufB);
-    fprintf(stderr, "[stage3f] IOAccelFindAccelerator(0, &bufA, &bufB, 0x30)\n");
-    kern_return_t kr = IOAccelFindAccelerator(0, bufA, bufB, 0x30);
+    fprintf(stderr, "[stage3f] IOAccelFindAccelerator(0, &bufA, &bufB)  [corrected: 3 real args]\n");
+    kern_return_t kr = IOAccelFindAccelerator(0, bufA, bufB);
     fprintf(stderr, "[stage3f]   -> 0x%x\n", kr);
     fprintf(stderr, "[stage3f]   bufA: "); for (int i=0;i<16;i++) fprintf(stderr,"%02x ",bufA[i]); fprintf(stderr,"\n");
     fprintf(stderr, "[stage3f]   bufB: "); for (int i=0;i<16;i++) fprintf(stderr,"%02x ",bufB[i]); fprintf(stderr,"\n");
 
     uint32_t accelID = 0;
-    fprintf(stderr, "[stage3f] IOAccelCreateAccelID(0, &accelID, 0x40, 6)\n");
-    kr = IOAccelCreateAccelID(0, &accelID, 0x40, 6);
+    fprintf(stderr, "[stage3f] IOAccelCreateAccelID(0, &accelID)  [corrected: 2 real args]\n");
+    kr = IOAccelCreateAccelID(0, &accelID);
     fprintf(stderr, "[stage3f]   -> 0x%x, accelID=0x%x\n", kr, accelID);
 
     /* real, confirmed service value from every live gdb trace this session was 0x1f07 - try

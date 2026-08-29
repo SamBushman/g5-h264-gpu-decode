@@ -113,6 +113,42 @@ plain fixed-function clears use, one that never touches the chain-link machinery
 never needs the embedded-opcode/marker consumer. That third path is a reasonable next target if this
 investigation continues.
 
+## Definitive confirmation, part 2: the exact call site that actually corrupted the chain
+
+Traced the real call path from `glUseProgramObjectARB(prog)` (re-binding the already-used program,
+the step that immediately preceded the second hang). `_gldUpdateDispatch` (address `00022290`) calls
+`FUN_0001bac0` (address `0001bac0`) whenever a dirty-state bit is set (`(*param_3 & 0x180) != 0` at
+`_gldUpdateDispatch`'s own line `if ((*param_3 & 0x180) != 0) { ... FUN_0001bac0(param_1); ... }`) -
+exactly the kind of state change a program rebind would trigger. `FUN_0001bac0`'s real decompile:
+```c
+puVar4 = *(uint **)(param_1 + 0x1d8);                       // read the CURRENT chain-link pointer
+*puVar4 = (int)puVar2 - (int)puVar4 >> 2 | *puVar4;          // dereference it and WRITE through it
+*(undefined4 **)(param_1 + 0x1d8) = puVar2;                  // then advance chain-link to a new record
+*puVar2 = 0x41000000;                                        // writes a new embedded-opcode marker
+...
+if (*(int *)(param_1 + 0x1e4) + 0x28U < *(uint *)(param_1 + 0x1dc)) {
+    FUN_0001a0f0(param_1, 0x1000000);                         // separate, real cursor-based flush check
+}
+```
+This is the exact, concrete mechanism: `stage3g_real_injection.c`'s final step overwrote
+`AGLContext+0x17d8` (`param_1+0x1d8`) with an arbitrary "advanced pointer" value that has no
+relationship to a real chain-link target. The very next `glUseProgramObjectARB(prog)` call reached
+this code, read that corrupted value into `puVar4`, and **immediately dereferenced and wrote through
+it** (`*puVar4 = ... | *puVar4`) - writing a bogus, essentially-random relative-distance value into
+whatever memory the corrupted pointer happened to still validly point to (44 bytes past a previously-
+real address inside the same large mapped buffer, so no immediate fault). That corrupted distance
+value becomes part of the real command-buffer content the kernel's `process_command_buffer` later
+walks as a chain of markers - a corrupted chain-walk hanging the GPU's command processor (and, per the
+user's report, blanking the display) is now a fully traced, not merely inferred, explanation. New
+marker value found in the same function worth adding to `stage3-embedded-opcode-language.md`'s table:
+`0x41000000` (writes real per-surface format state, byte read from `surface+0x38`, similar shape to
+the already-mapped `0x46000000` fast-clear opcode - not yet given a real operation name).
+
+Also checked and ruled out the simpler "rebinding directly triggers `FUN_0001a0f0`" hypothesis:
+`_gldUpdateDispatch` and `_gldDestroyPipelineProgram` never call it directly, and neither do the two
+sibling functions called alongside `FUN_0001bac0` (`FUN_00017260`, `FUN_00007d50` - both decompiled,
+neither touches the buffer fields at all). `FUN_0001bac0` is the one and only real link in this chain.
+
 ## Real, concrete correction for any future attempt
 
 - The real write cursor is at `AGLContext+0x17dc`, not `+0x17d8`. Any future injection design should

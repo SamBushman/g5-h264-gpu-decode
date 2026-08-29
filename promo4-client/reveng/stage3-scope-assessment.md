@@ -48,6 +48,28 @@ two real sources (Stage 2b's Type-2 filler). AMD's own doc separately documents 
 risk on a related register group (`PS3_VTX_FMT`/`PS3_TEX_SOURCE`, §10.9.5: "can cause bad textures or
 hangs in R5xx chips") - a concrete, real illustration of the kind of mistake this territory allows for.
 
+## Real, definitive confirmation: no scratch memory region exists among the four known types
+
+Checked `clientMemoryForType`'s real handlers for the two remaining memory types not yet fully
+characterized. **Type 2 is a "context buffer"** (`init_context_buffer_header`, a
+`VendorContextBufferHeader`, real fixed size `0x8000` - matching the exact size measured empirically
+in Stage 2a) - real, structured, kernel-managed state, not general-purpose memory (almost certainly
+related to the per-context register shadow/restore mechanism `store_reg` revealed). Type 4's handler
+does dynamic AGP-backed growth (`FUN_0000aee8` with a doubling pattern) consistent with, not
+contradicting, Stage 0's fence-region finding - a different layer of the same subsystem. **All four
+real memory types (0=embedded calibration plist, 1=command buffer, 2=context/state buffer, 4=fence
+region) are confirmed real, specific, actively-used driver subsystems - none is a general-purpose
+scratch buffer available to render into.** The switch's `default` case returns `kIOReturnBadArgument`
+for any other type value - there is no fifth type to try.
+
+This is a real, concrete, structural blocker for a self-contained draw, not just elevated complexity:
+this client interface's only memory-mapping mechanism (`IOConnectMapMemory` across these four known
+types) has no room in it for an ad hoc render target. A real attempt would need to find how
+`VendorTextureBuffer`/surface memory actually gets allocated instead - real symbols already seen in
+this kext (`allocVendorTextureBuffer`, `addTransferToGART`) suggest a separate mechanism, likely
+through additional external-method selectors not yet decompiled - genuinely new discovery work, not a
+known gap to fill in with more careful register programming.
+
 ## Honest assessment
 
 A fully self-contained draw is achievable in principle - the real packet format and load mechanism are

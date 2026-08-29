@@ -149,19 +149,30 @@ Also checked and ruled out the simpler "rebinding directly triggers `FUN_0001a0f
 sibling functions called alongside `FUN_0001bac0` (`FUN_00017260`, `FUN_00007d50` - both decompiled,
 neither touches the buffer fields at all). `FUN_0001bac0` is the one and only real link in this chain.
 
-## Bonus: resolves Stage 0's long-open "memory type 2 purpose" question
+## Correction: memory type 2 is NOT the vertex/index buffer pool - refines an earlier, more authoritative finding instead
 
-While tracing the above, confirmed something `stage0-dispatch-table.md` flagged as "not yet determined
-... only touched by `_gldCreateContext` so far": memory type 2's mapped base is stored at word-offset
-`0x82` from the renderer struct (`puVar6[0x82]`, i.e. byte offset `0x208` - `_gldCreateContext`:
-`IOConnectMapMemory(conn, 2, task, puVar6+0x82, puVar6+0x83, 1)`). `FUN_00017310`'s embedded-opcode
-handler for marker `0x29b` (real code, already decompiled for the chain-link investigation above)
-dereferences `*(int *)(param_1 + 0x208)` repeatedly as a growth-allocator control block (fields at
-`+8`/`+0xc`), tracked against a real running position/limit at `param_1+0x1f4`/`+0x1f8`/`+0x1fc`, and
-calls external-method selector `0x12` (already known: "vertex/index buffer growth allocation") to get
-more space from the kernel when the local allocator runs low. **Memory type 2 is the vertex/index
-buffer pool** - confirmed via an exact address match between `_gldCreateContext`'s allocation site and
-`FUN_00017310`'s real consumer, not inference.
+An earlier version of this entry claimed memory type 2 was "the vertex/index buffer pool," reasoning
+from an exact address match: `_gldCreateContext` stores type 2's mapped base at word-offset `0x82`
+(byte `0x208`), and `FUN_00017310`'s embedded-opcode handler for marker `0x29b` dereferences
+`*(int *)(param_1 + 0x208)` as a growth-allocator control block, calling external-method selector
+`0x12` ("vertex/index buffer growth allocation") when local space runs low. **That address match is
+real, but the conclusion was wrong** - it contradicts an earlier, more authoritative finding already in
+this repo (`stage3-scope-assessment.md`, from a direct kernel-side decompile of `clientMemoryForType`):
+**type 2 is the "context buffer"** (`init_context_buffer_header`, a `VendorContextBufferHeader`, real
+fixed size `0x8000`, matching Stage 2a's own empirical measurement) - real, kernel-managed
+register-shadow/restore state, not a general vertex/index pool.
+
+Reconciling both: `*(int *)(param_1 + 0x208)` doesn't point to type 2's buffer directly - it's
+DOUBLY dereferenced (`*(*(param_1+0x208) + 0xc)`), meaning `param_1+0x208` holds a pointer to a small
+control header, and `+8`/`+0xc` from THAT are offsets *within* the mapped type-2 buffer itself (a
+small embedded sub-allocator header living at the very start of the fixed `0x8000`-byte context
+buffer). **The real, corrected picture**: memory type 2 is genuinely the context/state buffer as the
+kernel decompile says, and it *also* hosts a small growth-style sub-allocator (tracked via
+`param_1+0x1f4`/`+0x1f8`/`+0x1fc`, grown via selector `0x12`) for vertex/index-adjacent scratch data
+carved out of that same buffer - not a separate pool of its own. Worth remembering for this whole
+investigation: cross-check a new address-match finding against everything already documented before
+asserting it, even when the match looks exact - the failure mode here was trusting one real coincidence
+without checking whether it contradicted existing, more deeply-sourced work.
 
 ## Fourth independent confirmation of the `+0x1600` delta
 

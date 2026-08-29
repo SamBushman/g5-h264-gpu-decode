@@ -149,6 +149,20 @@ Also checked and ruled out the simpler "rebinding directly triggers `FUN_0001a0f
 sibling functions called alongside `FUN_0001bac0` (`FUN_00017260`, `FUN_00007d50` - both decompiled,
 neither touches the buffer fields at all). `FUN_0001bac0` is the one and only real link in this chain.
 
+## Bonus: resolves Stage 0's long-open "memory type 2 purpose" question
+
+While tracing the above, confirmed something `stage0-dispatch-table.md` flagged as "not yet determined
+... only touched by `_gldCreateContext` so far": memory type 2's mapped base is stored at word-offset
+`0x82` from the renderer struct (`puVar6[0x82]`, i.e. byte offset `0x208` - `_gldCreateContext`:
+`IOConnectMapMemory(conn, 2, task, puVar6+0x82, puVar6+0x83, 1)`). `FUN_00017310`'s embedded-opcode
+handler for marker `0x29b` (real code, already decompiled for the chain-link investigation above)
+dereferences `*(int *)(param_1 + 0x208)` repeatedly as a growth-allocator control block (fields at
+`+8`/`+0xc`), tracked against a real running position/limit at `param_1+0x1f4`/`+0x1f8`/`+0x1fc`, and
+calls external-method selector `0x12` (already known: "vertex/index buffer growth allocation") to get
+more space from the kernel when the local allocator runs low. **Memory type 2 is the vertex/index
+buffer pool** - confirmed via an exact address match between `_gldCreateContext`'s allocation site and
+`FUN_00017310`'s real consumer, not inference.
+
 ## Real, concrete correction for any future attempt
 
 - The real write cursor is at `AGLContext+0x17dc`, not `+0x17d8`. Any future injection design should

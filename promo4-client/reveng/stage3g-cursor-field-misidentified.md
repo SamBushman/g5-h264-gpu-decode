@@ -91,6 +91,28 @@ reality:
   fully consistent explanation for a real, display-affecting, SSH-unresponsive hang - not a simple
   invalid-memory-access crash, which is exactly why it manifested as a hang rather than a clean error.
 
+## Definitive confirmation: the actual initialization code
+
+Found the real one-time context-creation initializer, `FUN_0002c790` (called from the end of
+`_gldCreateContext`), which removes any doubt - this is the literal, unconditional setup code, not an
+inferred pattern:
+```c
+iVar8 = *(int *)(param_1 + 0x1e4);              // iVar8 = base
+*(int *)(param_1 + 0x1dc) = iVar8 + 0x20;       // CURSOR := base + 0x20
+*(int *)(param_1 + 0x1d8) = iVar8 + 0x1c;       // CHAIN-LINK := base + 0x1c
+*(int *)(param_1 + 0x1e0) = iVar8 + 0x20 + *(int *)(iVar8 + 0x10) * 4 + -0x94;  // end/limit
+*(undefined4 *)(iVar8 + 0x1c) = 0;              // header's own +0x1c field explicitly zeroed
+```
+Cursor and chain-link are set to two *different* values (`base+0x20` vs `base+0x1c`) at the exact same
+moment, by the exact same function - conclusive proof they are distinct fields with the roles
+described above, not an artifact of pattern-matching two separately-observed runs. This also explains
+why the plain-clear test read the header's own `+0x1c` byte as `1` (the kernel's untouched default):
+that path evidently never routes through this initializer or through `FUN_0001a0f0` - both of which
+unconditionally zero it - so a third, simpler, not-yet-identified buffer-management path must be what
+plain fixed-function clears use, one that never touches the chain-link machinery at all because it
+never needs the embedded-opcode/marker consumer. That third path is a reasonable next target if this
+investigation continues.
+
 ## Real, concrete correction for any future attempt
 
 - The real write cursor is at `AGLContext+0x17dc`, not `+0x17d8`. Any future injection design should

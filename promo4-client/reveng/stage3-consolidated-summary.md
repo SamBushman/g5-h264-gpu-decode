@@ -62,3 +62,29 @@ needing precision rather than more discovery.
 `241af35` through `f894ab7` on `g5-h264-gpu-decode`, `promo4-client/` directory - covering PROMO4
 Stages 0 through 2 (fully complete, successful) and this entire Stage 3 investigation (real, substantial,
 honest progress; the core native-ISA reproduction question remains open but precisely scoped, not stuck).
+
+## Real follow-up: disassembly-confirmed prototypes, one real success, one real remaining puzzle
+
+Disassembled (not decompiled - real raw PowerPC instructions) the exact call sites for all four real
+`IOAccel*` functions inside `_CGLSetPBuffer`. **Fully decisive result for the shape structure**: the
+real 20-byte structure `IOAccelSetSurfaceFramebufferShape` builds is now completely known byte-for-byte
+- offset 0x00 = constant `1`, offset 0x08/0x0a = width/height as `uint16_t`, everything else zero.
+Confirmed `IOAccelCreateSurface` takes exactly 4 arguments with the 4th a real output pointer (computed
+via `addi`, not loaded - definitively a pointer, not a value).
+
+Built `stage3f-real-surface` using these disassembly-derived prototypes, called directly (linked
+against `IOKit.framework`). **Real, clean success**: `IOAccelCreateAccelID(0, &accelID, 0x40, 6)`
+returned `kr=0`, `accelID=0xcf1b37b` - a real, meaningful, kernel-assigned identifier matching the exact
+numeric pattern (`0xc*******`) observed in every live trace of Apple's own working code this session.
+This is real, concrete proof the direct-linking approach works once a prototype is right.
+
+**Real, consistent remaining puzzle**: `IOAccelFindAccelerator` and `IOAccelCreateSurface` both
+consistently return the same distinctive, non-standard code `0x10000003` (not a recognizable
+`IOReturn`/Mach error shape) regardless of which real, observed argument values are tried (own accelID
+vs. the literal `0x1f07` seen in every trace). The fact that two *different* functions fail with the
+*identical* unusual code, while a third succeeds cleanly with a very similar call shape, suggests a
+deeper ABI/prototype mismatch specific to those two (extra/different argument type, or a
+different real return convention) rather than simply wrong parameter values - a distinct, narrower,
+still well-scoped question for continued disassembly work if this thread resumes.
+
+Health checks passed cleanly throughout; no crash at any point across every real attempt.

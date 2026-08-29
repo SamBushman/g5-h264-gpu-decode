@@ -163,6 +163,27 @@ more space from the kernel when the local allocator runs low. **Memory type 2 is
 buffer pool** - confirmed via an exact address match between `_gldCreateContext`'s allocation site and
 `FUN_00017310`'s real consumer, not inference.
 
+## Fourth independent confirmation of the `+0x1600` delta
+
+Every decompiled function passes `*(undefined4 *)(param_1 + 4)` as the IOKit connection handle to
+every `io_connect_method_*`/`IOConnectMapMemory` call (`_gldFinish`, `FUN_0001a0f0`, `FUN_00017310`,
+`FUN_00019db0` alike). `0x4 + 0x1600 = 0x1604` - an exact match to the gdb-found "connect handle"
+field this project already trusted. Combined with the base field (`0x1e4`/`+0x1600=0x17e4`) and the
+chain-link field (`0x1d8`/`+0x1600=0x17d8`), this is now four independent fields agreeing on the exact
+same constant delta - strong evidence `AGLContext` and the driver's internal renderer struct are the
+same underlying allocation, offset by a fixed `0x1600`, not reached through a separate pointer chase
+each time.
+
+Also decompiled the one remaining unexamined embedded-opcode handler, `FUN_00019db0` (marker `0x1fe`,
+gated on a real feature-object check at `param_1[0x3e]`). Same `base+0x28 < cursor` check confirmed yet
+again (expressed via word-indexed pointer arithmetic - `param_1[0x79]`/`param_1[0x77]`, i.e. byte
+`0x1e4`/`0x1dc` - rather than byte-offset casts, an independent Ghidra type-inference path landing on
+the same real offsets). Also surfaces a previously-undocumented external method, **selector `0`** on
+this `userClientType=1` GL-context connection (`io_connect_method_scalarI_structureI(param_1[1], 0,
+&local_28, 4, 0, 0)` - a 4-byte capability/dither-mode bitmask, gated on gamma-range float comparisons
+against `param_1[0xa95]`/`[0xa96]`). Not central to the injection-safety question, but rounds out
+opcode coverage and is worth folding into `stage0-dispatch-table.md`'s selector list later.
+
 ## Real, concrete correction for any future attempt
 
 - The real write cursor is at `AGLContext+0x17dc`, not `+0x17d8`. Any future injection design should

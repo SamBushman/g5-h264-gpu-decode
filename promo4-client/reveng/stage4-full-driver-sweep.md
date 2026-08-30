@@ -142,4 +142,22 @@ hardware backing for both the client-side fence mechanism's `AGLContext+0x1838` 
 `0x15e0`/`0x15e4` scratch-register hypothesis above - worth reconciling if this sweep reaches the
 function that actually sets up `this+0x864/0x868/0x86c`'s real addresses (not yet found).
 
+## `ATIR500DVDContext`/`ATIR500Surface` overlay path - real structure found, register writes not reached this pass
+
+Decompiled the real DVD-context overlay chain: `ATIR500DVDContext::write_regs`/`dvd_setup_overlay`/
+`dvd_enable_overlay`/`dvd_enable_deint` all delegate to `ATIR500Surface::dvd_setup_overlay`/
+`enable_overlay`/`disable_overlay`/`enable_deint`/`showbuffer`. **Honest result**: at this call depth,
+these are all real but currently trivial - they store parameters into per-surface state fields
+(`this+0x94/0x96/0x98/0x9a` for overlay geometry, `this+0xdac` for deinterlace mode) or are outright
+no-ops in this build (`enable_overlay`/`disable_overlay`/`showbuffer` all have empty bodies). The real
+MMIO overlay-scaler register writes (this GPU's real `OV0_*`-family registers, by analogy with the
+public ATI/Radeon overlay architecture, though not confirmed by name here) are not reached at this
+depth - most likely applied later, either from a vsync/interrupt-driven "commit staged overlay state"
+handler not yet located, or from a code path this exact kext build/config doesn't exercise. `write_regs`
+is architecturally notable on its own: a generic, always-present passthrough that writes an arbitrary
+caller-supplied (register, value) pair, masked to a 0x1FFC-byte window (`this_dvd_context+0x8c`'s MMIO
+base) - i.e. a real, intentional "let userspace poke a bounded slice of MMIO space" escape hatch,
+presumably how DVD Player itself configures overlay hardware without needing dedicated kernel API for
+every register.
+
 Committed as this sweep continues - more sections below as further functions are decoded.

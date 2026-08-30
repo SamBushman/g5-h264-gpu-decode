@@ -111,6 +111,21 @@ This directly extends and de-risks `stage4-TOP-DOWN-promo4-redesign-proposal.md`
 already assumed hand-written/AMD-doc-derived register sequences for a *fixed*, minimal test shader): any
 *future*, more ambitious custom-shader work no longer needs a bespoke compiler-writing effort at all.
 
+## Testable hypothesis for the unlocated final codegen step - hardware required, but not live tracing
+
+**Hypothesis**: the vendor-specific "generic IR to R5xx instruction word" step writes its output directly
+into the same command-buffer region this project already knows how to read (the corrected cursor at
+`AGLContext+0x17dc`, format already understood from `write_kernel_context_buffer_regs`'s
+`GA_US_VECTOR_INDEX`/`DATA` burst-write shape). If so, its output is observable **without a debugger at
+all**: compile and bind a real, simple ARB/GLSL program through the ordinary GL API, draw once, then have
+the *same test program* (not a separate tracer) read back the raw bytes it just submitted and locate the
+`US_ALU_RGBA_INST_VAL`-shaped words (`0x2049....`) actually written for that specific shader. Comparing
+those against the `_glpPPShaderLinearize` output for the identical source (obtained by linking
+`libGLProgrammability.dylib` directly, per the strategic shortcut above) would let the final encoding
+step be reconstructed by comparison, entirely through ordinary process memory the client already owns -
+real hardware execution is required to get genuine compiled output, but no interactive debugger is.
+Not attempted this session (no G5 access).
+
 ## Honest limits
 
 - The exact final "generic IR -> real R5xx instruction word" encoder was not located. This is the one

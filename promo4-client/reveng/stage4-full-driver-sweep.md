@@ -160,4 +160,37 @@ base) - i.e. a real, intentional "let userspace poke a bounded slice of MMIO spa
 presumably how DVD Player itself configures overlay hardware without needing dedicated kernel API for
 every register.
 
+## Follow-up top-down pass: `write_r500_3d_blit_state_packet` and `GetTextureOffset` newly tractable
+
+Prompted by the user's question ("does this research enable top-down analysis you couldn't do
+before?") - yes: revisited `ATIR500GLContext::write_r500_3d_blit_state_packet` (`0x2ac10`), the
+function `stage3-scope-assessment.md` originally flagged as too complex to fully decode. With the
+register map and HyperZ logic already confirmed, it decodes cleanly this time (only 116 lines - far
+smaller than it looked when opaque).
+
+**Real structural finding**: it writes into a real, named staging struct
+(`r500_3d_blit_state_packet_struct*`), not directly into a raw PM4 array - a different, complementary
+convention from `write_kernel_context_buffer_regs`'s flat (index,value) array. This struct is very
+likely serialized into real PM4 content by a separate function not yet located - a concrete next
+target if this thread continues.
+
+**Fourth independent confirmation of `SC_CLIP_RULE = 0xaaaa`** (`param_1+0x2b0 = 0xaaaa`, verbatim) -
+now confirmed from: AMD's own docs' bit-field description, the KolibriOS reference driver, the GA
+plugin's `write_kernel_context_buffer_regs`, and this function - four independent sources agreeing on
+one exact value.
+
+**Real progress on the previously-undecoded 40-entry format table** (`DAT_0004d2dc`/`DAT_0004d2e0`,
+28-byte stride, dumped but never interpreted since `stage3-embedded-opcode-language.md`): this function
+extracts five separate bit-fields from one table entry (table bits `[17:21]`, `[15:16]`, `[3:4]`,
+`[11:12]`, `[9:10]` - each independently masked and repositioned) and combines them into a single
+output field (`param_1+0x228`, very likely a real tiling/pitch-control register given the shape).
+This is real, partial progress on a genuinely hard problem this project flagged as unsolved months ago
+- full resolution would need locating the struct-to-PM4 serializer to confirm which real register
+`+0x228` becomes, not completed this pass.
+
+**`GetTextureOffset`** (`0x280c0`) decoded: real per-texture-backing-type offset computation
+(`VendorTextureBuffer+0x20`'s type byte selects among VRAM-direct, GART-mapped, and surface-backed
+paths), and the GART-mapped path reuses the exact same GART aperture base field (`this+0x8a4`) already
+confirmed in `submit_buffer` - another small, real cross-function confirmation.
+
 Committed as this sweep continues - more sections below as further functions are decoded.

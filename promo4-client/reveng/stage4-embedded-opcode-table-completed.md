@@ -115,5 +115,7 @@ beyond what was asked) - flagged clearly as a real, concrete next target if this
 ## Honest limits, updated
 
 `0x37` and `0x39` are now fully traced, not just categorized. The newly-found `0x2a` and the broader
-`0x16-0x29` range are real, confirmed-to-exist, and completely unexplored - an honest, clearly-scoped
-remainder for a future pass, not a limitation of this one.
+`0x16-0x29` range - and, it turned out, `0x02-0x05` and `0x2b-0x31` alongside it - have since been fully
+chased down in `stage4-opcode-range-0x02-0x31-traced.md`, including a second confirmed real example of
+the "blit via textured full-screen quad" technique (`0x31`) and a clarification that not every embedded
+`(index, value)` pair targets real MMIO (`0x28`'s software-internal `0x50b` field).

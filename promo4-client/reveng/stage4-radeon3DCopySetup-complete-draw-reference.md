@@ -88,6 +88,19 @@ this project's whole hang investigation has been centered on. Combined with
 about as strong a foundation as static analysis alone can provide for designing a future, correctly-
 targeted injection attempt.
 
+## Third and fourth confirmations: `_radeonCopy`/`_radeonFill`/`_radeonHighlight`/`_radeonSolidScanlines`
+
+Also decompiled the remaining real 2D-via-3D-engine blit functions (needed a manual `createFunction`
+call first - Ghidra's auto-analysis hadn't created Function objects at these exported-symbol addresses
+despite a full re-analysis pass, a real, minor tooling quirk worth noting for any future work on this
+binary). All four use the same already-confirmed register set (`VAP_OUT_VTX_FMT_*`, `VAP_PROG_STREAM_
+CNTL[_EXT]` arrays, `RS_INST_*`/`RS_IP_*` arrays, `GA_US_VECTOR_INDEX/DATA`, `US_CODE_ADDR`, `ZB_CNTL`,
+etc.) plus one genuinely new one: `TX_FILTER0_[0-15]` (`0x4400-0x443c`, confirmed exactly from index
+`0x1100`) - real per-texture-unit filter-mode configuration, consistent with `_radeonCopy` actually
+sampling a source texture (unlike the solid-fill case). No new registers beyond what
+`_radeon3DCopySetup`/`_radeon3DFillSetup` already established - this is genuinely the same real,
+confirmed pipeline-setup pattern reused consistently across every 2D-via-3D operation in this plugin.
+
 ## Independent second confirmation: `_radeon3DFillSetup`
 
 The sibling solid-color-fill function (`0x3540`) uses the identical register set and, critically, the

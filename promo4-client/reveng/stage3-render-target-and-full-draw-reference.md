@@ -80,6 +80,29 @@ OUT_ACCEL_REG(R300_TX_BORDER_COLOR_0 + unit*4, 0);
 Real, working, per-unit register layout (registers indexed by `unit*4`) - genuinely useful groundwork
 if a future attempt ever needs to bind a texture without going through the embedded-opcode language.
 
+## Update: Apple's own driver logic confirms the HyperZ scope reduction, not just register defaults
+
+Now that the kext binary itself is locally available (via the Tiger HD mount), decompiled
+`ATIR500GLContext::compute_sc_hyperz_en`/`compute_zb_bw_cntl` directly - the real functions
+`stage3-scope-assessment.md` originally flagged as "an entire real subsystem." Both are small and
+clean:
+```c
+uint ATIR500GLContext::compute_sc_hyperz_en(ATIR500GLContext *this, ulong param_1) {
+    // pAVar2 = the bound depth/stencil surface object (or a default sub-object if none)
+    if (pAVar2[0x35] == 0 || (param_1 & 1) == 0) return param_1 & ~1;   // HyperZ bit forced OFF
+    return param_1 | 1;                                                  // only ever ON if surface+0x35 is set
+}
+```
+`compute_zb_bw_cntl` has the same shape - real, non-trivial Z-bandwidth-control bits only ever get set
+when `surface+0x35` (and, for some bits, `surface+0x34` plus format-derived checks) is nonzero. **This
+is a stronger confirmation than the register-default evidence alone**: it's not just that
+`SC_HYPERZ_EN`/`ZB_CNTL` happen to default to 0 - Apple's own driver *actively computes* 0 for any
+render target that doesn't bind a depth/stencil surface with this specific flag set. A minimal,
+color-only render target (no Z/stencil surface at all) causes Apple's own logic to compute the exact
+same "off" result a hand-built minimal client would want - direct, driver-verified confirmation that
+skipping HyperZ entirely for such a test isn't a shortcut around Apple's design, it's what Apple's
+design itself does in that case.
+
 ## Overall assessment: this substantially de-risks the "fully self-contained draw" effort
 
 Combined with `stage3-rasterizer-enable-found.md`'s viewport/visibility findings, this project now has

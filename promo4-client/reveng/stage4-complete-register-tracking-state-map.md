@@ -86,9 +86,22 @@ real decompiled code - not inferred from address ranges alone:
 independent context each - genuinely real, just not in these two specific PDF revisions): `0x1383`
 (byte `0x4e0c`... note: resolved as `RB3D_COLOR_CHANNEL_MASK` above via a different index - `0x1383`
 itself decodes to byte `0x4e0c` too, meaning this is the SAME register written via two different code
-paths, consistent) and `0x1386` (byte `0x4e18` = `RB3D_ROPCNTL`, also now resolved above). Genuinely
-unresolved: `0x13cc` (byte `0x4f30`) - seen in both `write_kernel_context_buffer_regs` and here,
-consistently in the HiZ-adjacent register cluster, but absent from both local PDF revisions.
+paths, consistent) and `0x1386` (byte `0x4e18` = `RB3D_ROPCNTL`, also now resolved above).
+
+**Update (from the `0x02-0x31` opcode-range pass): `0x13cc` (byte `0x4f30`) resolved to a real source,
+just not a documented name.** Cross-checking the doc's own `ZB:` register list (`r5xx_accel_v15.txt`)
+shows a genuine gap between `ZB_DEPTHCLEARVALUE` (`0x4f28`) and `ZB_HIZ_OFFSET` (`0x4f44`) - `0x4f30` and
+a neighbor, `0x4f34` (index `0x13cd`, also written in the same `write_kernel_context_buffer_regs`
+cluster), both fall inside that gap, confirming they're real, undocumented ZB-block registers rather
+than software-internal bookkeeping (unlike the separate `0x50b`/`0x142c` case the opcode-range pass found
+in opcode `0x28`, which sits *outside* any real register block entirely). Better still: tracing the
+actual value written to `0x13cc` back through the decompiled code shows it's the **direct, unmodified
+result of `HZMEM_GetBlockOffset`** - the same named real HiZ-memory-manager call already used elsewhere
+in this function - and that exact same value is *also* written to a second undocumented register,
+`0x1399` (byte `0x4e64`, likewise absent from the local doc). So both mystery registers are real,
+consistent, HiZ-block-offset-carrying registers written from the same real function call - just two
+addresses this particular AMD doc revision doesn't happen to list. See
+`stage4-opcode-range-0x02-0x31-traced.md` for the full context this update was found in.
 
 ## Real, valuable discoveries beyond pure register-naming
 

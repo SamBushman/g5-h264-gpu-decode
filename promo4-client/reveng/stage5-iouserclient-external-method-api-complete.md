@@ -34,14 +34,15 @@ the subclass level, layered on top of the base table via the offset math already
 is the real dispatcher an `IOServiceOpen(..., type, ...)` call from userspace lands in - it switches on
 `type` (0/1/2/3) and calls one of four vtable slots (`this+0x5d4/0x5d8/0x5dc/0x5e0`) to construct the
 actual context object, tagging it with the caller's `task*` and completing the connection via three more
-vtable calls (`open`, then two initialization steps). **Which `type` value maps to which of the four
-context classes could not be resolved** - those exact vtable slots in `IOATIR500Accelerator`'s own vtable
-read back as zero, a real casualty of the same "Relocation type 0xf ... not supported" Mach-O relocations
-Ghidra warned about at import time (the same class of static-analysis ceiling already documented for
-`AGL.framework` - not a driver-logic dead end, a tooling limit). Honest gap, not pursued further; the
-`type` value could plausibly still be recovered by checking what `IOServiceOpen` call site(s) in
-`ATIRadeonX1000GLDriver.bundle`/`AGL.framework` actually pass, if a future pass wants to close it (framed
-here as a real question with a real, non-hardware test method: grep the userspace driver bundle for the
+vtable calls (`open`, then two initialization steps). Those exact vtable slots in
+`IOATIR500Accelerator`'s own vtable read back as zero at the time this was written, attributed to
+"Relocation type 0xf ... not supported" Mach-O relocations. **Update
+(`stage7-agl-ceiling-fixed-and-ioserviceopen-type-values.md`): resolved directly from real call sites
+instead - `type=0` opens the Surface context, `type=1` opens the GL context, confirmed from
+`_gldAttachDrawable`/`_gldCreateContext` in a freshly-imported, non-shared-project decompile of
+`ATIRadeonX1000GLDriver.bundle`. `type=2`/`type=3` (2D/DVD) remain elimination-based, not call-site-
+confirmed - neither the GA plugin nor the VA driver bundle call `IOServiceOpen` themselves.** The
+original grep-based test method below was superseded by that direct approach; the
 literal small-integer argument passed to its own `IOServiceOpen`/`IOConnectMethodScalarIStructI`-family
 call).
 
@@ -155,9 +156,8 @@ verify-before-second-write discipline this project has used for every prior hard
 
 ## Honest limits
 
-- The `type` argument mapping (`IOServiceOpen`'s connection-type value → which of the four context
-  classes gets constructed) is unresolved due to zeroed-out vtable slots from unsupported Mach-O
-  relocations - a real tooling ceiling, with a concrete non-hardware follow-up test method noted above.
+- The `type` argument mapping is now resolved for 2 of 4 values by direct call-site evidence
+  (`stage7-agl-ceiling-fixed-and-ioserviceopen-type-values.md`); the other 2 remain elimination-based.
 - The exact semantics of the method-table's flags word (`0xffff`, constant across every entry) and the
   precise meaning of each of the 2-3 small integer count fields per entry were not derived from any
   header/documentation - inferred only by shape-matching against the classic `IOExternalMethod`

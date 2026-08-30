@@ -54,4 +54,51 @@ the kext's memory type 0 (already known to be a 4KB status/register region) or r
 `AGLContext` field directly, submits a trivial buffer, and polls both locations to confirm they move
 together. Not run - flagging for whenever the G5 is back.
 
+## `initialize_hardware`/`setup_R500_internal_space`/`setupR520Pipes` - real hardware bring-up, many more registers confirmed
+
+Decompiled the three real hardware-bring-up functions `initialize_hardware` calls in sequence
+(`0x1f3c0`/`0x1cf70`/`0x1bd20`). Batch-checked every literal MMIO offset against the local docs:
+
+**Confirmed exactly**: `VAP_CNTL` (`0x2080` - same register the KolibriOS reference code writes),
+`VAP_PVS_STATE_FLUSH_REG` (`0x2284`), `CP_RB_BASE` (`0x700`), `CP_CSQ_CNTL`/`CP_CSQ_MODE` (`0x740`/
+`0x744`), `GB_PIPE_SELECT` (`0x402c`), `SU_REG_DEST` (`0x42c8` - matches `R500_SU_REG_DEST` in the
+KolibriOS reference exactly), `GB_TILE_CONFIG` (`0x4018`, written here with a real pipe-count-derived
+value during `setupR520Pipes` - the same real init-time write the KolibriOS reference performs),
+`GA_SOFT_RESET` (`0x429c`), `SC_CLIP_RULE` (`0x43d0`, written `0xffff0000` here at hardware-init time -
+a different value from the per-draw `0xaaaa` already confirmed, consistent with a startup default
+before real rendering begins).
+
+**Real, structurally-confirmed pattern, not yet name-matched**: `setup_R500_internal_space` repeatedly
+writes an "index" to `mmioBase+0x30` immediately followed by a "data" value to `mmioBase+0x34` - the
+exact shape of an indirect index/data register-access pair (like `GA_US_VECTOR_INDEX`/`_DATA` already
+used elsewhere in this project, but for a different block - very likely a real Memory Controller
+indirect access pair, common on this GPU family for registers not otherwise memory-mapped). Real index
+values seen: `0x10000000`-`0x17000000` (top-byte-tagged, matching the "one index dword selects one MC
+register" convention) with GART/memory-range-derived data (base addresses, sizes).
+
+**`setupR520Pipes`'s real polling pattern**: every register write in this function is preceded by a
+real "wait for GPU idle" loop reading `RBBM_STATUS` (`0xe40-0xe43`, byte-reassembled - re-confirming,
+independently, the already-known register from a completely different function) combined with two
+additional status bits at byte `0x1722` (not found in local docs - likely a display/CRT-controller
+status register in a doc this project doesn't have) - real, textbook "don't touch pipe config while
+the GPU might be mid-operation" synchronization.
+
+**Not found in either local doc** (flagged honestly, not guessed): `0x15e0`-`0x15fc` (see below - now
+understood functionally even without a name), `0x16e8`, `0x16cc`, `0x2284`'s neighbors `0x4614`/
+`0x47c8`/`0x4bec`/`0x4398`, `0x70`/`0x74`/`0xf8-0xfb`/`0x130-0x134`/`0x6110`/`0x6910` (low addresses,
+plausibly Memory-Controller/config-space registers outside this doc's 3D-acceleration focus), `0x774`/
+`0x770`/`0x1fa8`, `0x170c`/`0x4124`/`0x4be8`, and the byte-level sub-addresses `0x6104`/`0x6904`/
+`0x6148`/`0x6948`/`0x60c4`/`0x68c4` (read, not written, in `initialize_hardware` - captured into
+per-device fields `this+0xb78..0xb8c`, likely real chip-revision/capability-strap readback).
+
+**Real functional confirmation of `0x15e0`/`0x15e4` (already flagged as unresolved in the submit_buffer
+entry above)**: `setup_R500_internal_space` explicitly zeroes the whole `0x15e0-0x15fc` range at
+hardware-init time, and `initialize_hardware` writes the context's buffer-submission counter
+(`this+0x50`) to `0x15e0` and the retirement counter (`this+0x850`) to `0x15e4` immediately after
+`start_promo4_engine` succeeds. **This confirms the hypothesis from the submit_buffer entry above
+without needing hardware**: `0x15e0`/`0x15e4` really are the live submission/retirement timestamp
+scratch registers - initialized to the current (post-engine-start) counter values, then advanced by
+`submit_buffer_retired`'s later writes. This is almost certainly the literal hardware backing for the
+fence mechanism's `AGLContext+0x1838` live completion counter already found client-side.
+
 Committed as this sweep continues - more sections below as further functions are decoded.

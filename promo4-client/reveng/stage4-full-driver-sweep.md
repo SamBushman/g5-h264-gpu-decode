@@ -101,4 +101,45 @@ scratch registers - initialized to the current (post-engine-start) counter value
 `submit_buffer_retired`'s later writes. This is almost certainly the literal hardware backing for the
 fence mechanism's `AGLContext+0x1838` live completion counter already found client-side.
 
+## `load_promo4_micro_code`/`start_promo4_engine`/`stop_promo4_engine` - real, complete, register-confirmed lifecycle
+
+Decompiled all three (`0x1cd30`/`0x1cd90`/`0x1cb00`). **`load_promo4_micro_code`** is exactly what its
+name says: writes `CP_ME_RAM_ADDR` (`0x7d4`, reset to 0 = start address), then loops 256 times writing
+one dword each to `CP_ME_RAM_DATAH`/`CP_ME_RAM_DATAL` (`0x7dc`/`0x7e0`) from a local 2KB data blob
+(`&DAT_0004ca60`) - **this is the literal embedded microcode blob** an earlier session's kext decompile
+already inferred exists ("reuse Apple's own microcode blob, don't author one") - now seen loading via
+the real, exact, doc-confirmed register pair.
+
+**`start_promo4_engine`** real register sequence, every one confirmed: `CP_RB_CNTL` (`0x704`,
+configured with ring-size/fetch flags), `CP_RB_WPTR_DELAY` (`0x718`), `CP_RB_WPTR` (`0x714`, reset),
+`CP_RB_RPTR_ADDR` (`0x70c`), `CP_CSQ_CNTL` (`0x740`, set to `0x40`) - then a real polling loop on
+`RBBM_STATUS` bits (`0xe41`/`0xe42`, mask `0x10200`) waiting for the CP to report ready, with a bounded
+1,000,000-iteration timeout before giving up. A complete, real "bring the ring buffer online" sequence.
+
+**`stop_promo4_engine`** is the exact inverse, also fully register-confirmed: a bounded busy-wait on
+`RBBM_STATUS`+the same `0x1722` status byte from `setupR520Pipes`, then `0x770`→0 (shutdown flag, not
+found by name in local docs), `CP_RB_CNTL` reconfigured to a disabled state, `CP_CSQ_MODE`→0,
+`CP_RB_RPTR_WR`→0, `CP_RB_WPTR`→0 - genuinely tearing down what `start_promo4_engine` brought up,
+register for register.
+
+## `waitForRetiredTimeStamp`/`waitForTimeStampNoLock` - the real fence completion mechanism, confirmed as DMA'd system memory, not a register
+
+Decompiled both (`0x25080`/`0x25360`) - real implementations of the timestamp-wait family
+`stage3-fence-mechanism.md` speculated about from the client side. **Confirms the completion counter is
+NOT a simple MMIO register** - it's read via:
+```c
+pbVar1 = (byte *)(*(int *)(this + 0x864) + *(int *)(this + 0x868));  // base + offset, a real pointer
+uVar2 = pbVar1[3]<<24 | pbVar1[2]<<16 | pbVar1[1]<<8 | pbVar1[0];      // same LE hardware byte-swap pattern
+```
+`this+0x864` is a base pointer to a real shared memory region (almost certainly the GPU-DMA'd scratch
+area this project already knows exists, given the identical byte-swap-from-hardware pattern seen
+everywhere else), with different fixed offsets (`+0x868` here, `+0x86c` in the `NoLock` variant, and
+presumably a third for the IDCT-specific family below) selecting which of several counters to read -
+consistent with genuinely independent submission/retirement/IDCT-consumption completion tracking. Real
+bounded wait loop (up to `0xc351` = 50001 retries, ~100us sleep each via `FUN_000251b4`/a real
+Mach `assert_wait`-style primitive) before giving up. This is almost certainly the real, ultimate
+hardware backing for both the client-side fence mechanism's `AGLContext+0x1838` counter AND the
+`0x15e0`/`0x15e4` scratch-register hypothesis above - worth reconciling if this sweep reaches the
+function that actually sets up `this+0x864/0x868/0x86c`'s real addresses (not yet found).
+
 Committed as this sweep continues - more sections below as further functions are decoded.

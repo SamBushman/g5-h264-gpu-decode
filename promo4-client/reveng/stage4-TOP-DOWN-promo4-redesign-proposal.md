@@ -70,6 +70,16 @@ so will not hang the machine, because it never exercises the unbounded chain-wal
 8. Read back the pbuffer and compare against the expected fill/copy color - the same verification
    pattern every prior stage in this project has used.
 
+## Update: an even more complete, more directly Apple-sourced register map now exists
+
+`stage4-complete-register-tracking-state-map.md` (found by tracing this same function family's real
+caller, `restore_state_destroyed_by_pageoff`) supersedes the KolibriOS-derived sequence step 4 above
+cites - it's Apple's own "rebuild the entire render state after a VRAM eviction" function, which by
+construction must cover every register that matters, confirmed field-by-field against a real struct
+rather than reconstructed from a third-party driver. Any future implementation of step 4 should use
+that map as the primary register-value reference, with the KolibriOS sequence as a secondary
+cross-check where the two overlap (they agree everywhere they've been compared so far).
+
 ## Real, honest remaining gaps this proposal doesn't close
 
 - **The client-side `AGLContext`-relative offset for the kernel's own completion-counter base

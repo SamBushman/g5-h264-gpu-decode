@@ -70,6 +70,18 @@ so will not hang the machine, because it never exercises the unbounded chain-wal
 8. Read back the pbuffer and compare against the expected fill/copy color - the same verification
    pattern every prior stage in this project has used.
 
+## Update: custom shaders no longer require writing a compiler
+
+`stage6-shader-compiler-architecture-and-strategic-shortcut.md` found that `libGLProgrammability.dylib`
+is a real, public, directly-linkable framework exposing a complete ARB-assembly/GLSL front-end parser
+plus a full optimizing middle-end (inlining, loop unrolling, constant folding, dead-code elimination,
+and real interference-graph register allocation) - the same one the real ATI driver bundle calls. Any
+future extension of this proposal to *custom*, non-fixed shaders should link this framework directly
+(`_glpPPShaderToProgram` then `_glpPPShaderLinearize`) rather than writing a compiler from scratch; only
+a much smaller final "generic IR to R5xx instruction word" encoder remains genuinely new work, and its
+target format (the `US_ALU_RGBA_INST`-style encoding) is already independently confirmed in
+`stage4-radeon3DCopySetup-complete-draw-reference.md`.
+
 ## Update: an even more complete, more directly Apple-sourced register map now exists
 
 `stage4-complete-register-tracking-state-map.md` (found by tracing this same function family's real

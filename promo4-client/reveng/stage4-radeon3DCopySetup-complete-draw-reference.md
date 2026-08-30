@@ -88,6 +88,13 @@ this project's whole hang investigation has been centered on. Combined with
 about as strong a foundation as static analysis alone can provide for designing a future, correctly-
 targeted injection attempt.
 
+## Independent second confirmation: `_radeon3DFillSetup`
+
+The sibling solid-color-fill function (`0x3540`) uses the identical register set and, critically, the
+identical real shader instruction words (`US_CMN_INST_VAL`-shaped `0x78105`, and **`0x20490000`
+again** for `US_ALU_RGBA_INST_VAL`) - a second, independent confirmation from a different real code
+path in the same binary, not a fluke of one function.
+
 **Testable hypothesis, documented per the user's instruction, NOT attempted (no hardware this
 session)**: replaying this exact register sequence (in place of the fragile embedded-marker-chain
 approach this project's live attempts have used so far) inside a real, isolated `AGLContext`'s command

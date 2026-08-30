@@ -94,6 +94,24 @@ if (uVar75 < 0x10) {   // top byte in [0x06, 0x15] - 16 consecutive values
 rebind the texture currently attached to unit N"** (`N = topByte - 6`), matching R5xx's real 16 texture
 units. A genuine, concrete addition to this project's opcode catalog.
 
+## Confirmed systemic, not GL-specific: the 2D context has the identical unbounded loop
+
+Decompiled `ATIR5002DContext::process_command_buffer` (`000326d0`, 512 lines - much smaller than the GL
+context's variant, reflecting a simpler opcode set, but structurally identical). Same setup
+(`puVar18 = (this+0xac) + 0x1c`), same `& 0xffffff` low-24-bit distance extraction at every branch, and
+the exact same termination logic:
+```c
+uVar15 = uVar15 + uVar17;
+puVar18 = puVar18 + uVar17;
+if (uVar17 == 0) { ... finalize, return ... }
+} while (true);
+```
+No bounds check here either. **This confirms the unbounded chain-walk is a systemic property of this
+driver family's command-buffer protocol, not a GL-context-specific oversight** - both `ATIR500GLContext`
+and `ATIR5002DContext` (and, very likely, `ATIR500DVDContext` given the same class-hierarchy pattern,
+not independently checked) implement the identical convention, with the identical lack of protection
+against a malformed chain.
+
 ## Real, concrete design implication for any future injection attempt
 
 Given the walk has zero bounds checking and zero validation of what it reads, **any future attempt to

@@ -74,6 +74,20 @@ detection for DVD) - real, useful information about the system's architecture, e
 `type=2`/`type=3` assigned only by the strong, but not independently verified, process of elimination
 (four types, four classes, two confirmed, two accounted for).
 
+## `registerNotificationPort`'s "bad instruction data" dissolves entirely - it isn't a real function
+
+The third cited ceiling: `IOUserClient::registerNotificationPort` at kext address `0x52000` decompiled
+to `halt_baddata()` with "Control flow encountered bad instruction data." Dumping the kext's memory
+block map (`__text`/`__cstring`/`__const`/.../`EXTERNAL`/`ABSOLUTE`) shows `0x52000` falls inside
+Ghidra's synthetic **`EXTERNAL`** block (`0x4e000`-`0x6adff`, `initialized=false`) - the placeholder
+region Ghidra invents to host symbols for references the linker never resolved locally (the same
+mechanism behind the `IOUserClient::vtable`/`IOAccelerator::vtable` address-table warnings seen at
+import time). **This means `registerNotificationPort` is not a real function this kext implements at
+all** - it's an external, framework-inherited `IOUserClient` base-class method the driver never
+overrides, and Ghidra's "bad instruction data" was simply an artifact of trying to disassemble a
+synthetic placeholder that was never real code. This fully dissolves the question rather than just
+answering it: there is no driver-specific notification-port behavior to find, because none exists.
+
 ## Honest limits
 
 - Types 2/3's exact values remain elimination-based, not call-site-confirmed - closing this fully would

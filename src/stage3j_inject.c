@@ -98,7 +98,15 @@ int main(int argc, char **argv) {
         LOG("[3j] injected %d dwords at +0x%x, cursor advanced to +0x%x\n", n, cur - base, cur + 4u * n - base);
     }
     if (ok && !doInject) LOG("[3j] capture mode: nothing written to the command buffer\n");
-    quad(); glFinish(); rd(after);
+    quad();
+    if (!doInject) {          /* second read-only capture: the buffer AFTER the draw is queued, before the flush - for inject_sim2.py (insertion with the driver's later records) */
+        uint32_t l2 = *(uint32_t *)(c + 0x17d8), c2 = *(uint32_t *)(c + 0x17dc), lm2 = *(uint32_t *)(c + 0x17e0), b2 = *(uint32_t *)(c + 0x17e4);
+        char nm[512]; snprintf(nm, sizeof nm, "%s.post", argv[4]);
+        FILE *f = (b2 == base && c2 > cur && c2 - b2 < 0x40000) ? fopen(nm, "wb") : NULL;
+        if (f) { uint32_t h[5] = {l2 - b2, c2 - b2, lm2 - b2, 0x50414330u, 0}; fwrite(h, 4, 5, f); fwrite((void *)b2, 1, (c2 - b2) + 16, f); fflush(f); fcntl(fileno(f), F_FULLFSYNC, 0); fclose(f); LOG("[3j] post-draw capture written %s (link=+0x%x cursor=+0x%x)\n", nm, l2 - b2, c2 - b2); }
+        else LOG("[3j] post-draw capture skipped (buffer changed or implausible)\n");
+    }
+    glFinish(); rd(after);
     LOG("[3j] after: %d,%d,%d,%d  (baseline was %d,%d,%d,%d)\n", after[0], after[1], after[2], after[3], base0[0], base0[1], base0[2], base0[3]);
     /* the context must still work normally afterwards */
     unsigned char again[4]; glClearColor(0.0f, 1.0f, 0.0f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); glFinish(); rd(again);

@@ -1,0 +1,8 @@
+[3j] mode=inject, 11 PM4 dwords from blue.hex
+[3j] baseline (GLSL red): 255,0,0,255
+[3j] link=0026a558 cursor=0026a57c limit=002a9f6c base=0026a000 (link-base=0x558 cursor-base=0x57c limit-base=0x3ff6c)
+[3j] capture written cap_A4.bin
+[3j] injected 11 dwords at +0x57c, cursor advanced to +0x5a8
+[3j] after: 0,0,255,255  (baseline was 255,0,0,255)
+[3j] post-check clear green: 0,255,0,255
+[3j] done

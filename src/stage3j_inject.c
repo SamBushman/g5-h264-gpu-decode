@@ -43,8 +43,13 @@ static GLhandleARB linkp(const char *vs, const char *fs) {
     if (!ok) { LOG("link failed\n"); exit(1); }
     return p;
 }
-static void quad(void) { glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(4, 0); glVertex2f(4, 4); glVertex2f(0, 4); glEnd(); }
-static void rd(unsigned char o[4]) { glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, o); }
+static int g_tex = 0;
+static void quad(void) {
+    if (g_tex) { glBegin(GL_QUADS); glMultiTexCoord2f(GL_TEXTURE0, 0, 0); glVertex2f(0, 0); glMultiTexCoord2f(GL_TEXTURE0, 4, 0); glVertex2f(4, 0); glMultiTexCoord2f(GL_TEXTURE0, 4, 4); glVertex2f(4, 4); glMultiTexCoord2f(GL_TEXTURE0, 0, 4); glVertex2f(0, 4); glEnd(); return; }
+    glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(4, 0); glVertex2f(4, 4); glVertex2f(0, 4); glEnd(); }
+static unsigned char g_all[64];
+static void rd(unsigned char o[4]) { if (g_tex) glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, g_all); glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, o); }
+static void pr(const char *tag, unsigned char *a) { int i; LOG("[3j] %s all16:", tag); for (i = 0; i < 16; i++) LOG(" %d,%d,%d,%d", a[i*4], a[i*4+1], a[i*4+2], a[i*4+3]); LOG("\n"); }
 
 int main(int argc, char **argv) {
     if (argc < 5) { fprintf(stderr, "usage: %s capture|inject PM4.hex LOG CAPFILE\n", argv[0]); return 2; }
@@ -68,12 +73,25 @@ int main(int argc, char **argv) {
     AGLPbuffer pbuf; aglCreatePBuffer(4, 4, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA, 0, &pbuf);
     aglSetPBuffer(ctx, pbuf, 0, 0, 0); aglSetCurrentContext(ctx);
     glViewport(0, 0, 4, 4); glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, 4, 0, 4, -1, 1); glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    GLhandleARB prog = linkp("void main(){gl_Position=gl_ModelViewProjectionMatrix*gl_Vertex;}", "void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}");
+    g_tex = getenv("WORKLOAD") && !strcmp(getenv("WORKLOAD"), "tex");
+    GLhandleARB prog;
+    if (!g_tex) prog = linkp("void main(){gl_Position=gl_ModelViewProjectionMatrix*gl_Vertex;}", "void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}");
+    else {
+        float tex[64]; int i; GLuint t;
+        for (i = 0; i < 16; i++) { tex[i*4+0] = (i % 4) / 4.0f; tex[i*4+1] = (i / 4) / 4.0f; tex[i*4+2] = 0.5f; tex[i*4+3] = 1.0f; }
+        glGenTextures(1, &t); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, t);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_FLOAT, tex);
+        prog = linkp("void main(){gl_Position=gl_ModelViewProjectionMatrix*gl_Vertex; gl_TexCoord[0]=gl_MultiTexCoord0;}",
+                     "uniform sampler2DRect t; void main(){gl_FragColor=texture2DRect(t,gl_TexCoord[0].xy);}");
+    }
     glUseProgramObjectARB(prog);
+    if (g_tex) glUniform1iARB(glGetUniformLocationARB(prog, "t"), 0);
 
     unsigned char base0[4] = {0}, after[4] = {0};
     glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT); quad(); glFinish(); rd(base0);
-    LOG("[3j] baseline (GLSL red): %d,%d,%d,%d\n", base0[0], base0[1], base0[2], base0[3]);
+    LOG("[3j] baseline (%s): %d,%d,%d,%d\n", g_tex ? "GLSL texture passthrough" : "GLSL red", base0[0], base0[1], base0[2], base0[3]);
+    unsigned char baseAll[64]; if (g_tex) { memcpy(baseAll, g_all, 64); pr("baseline", baseAll); }
 
     glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);          /* leaves a pending record with a small body, unflushed */
     unsigned char *c = (unsigned char *)ctx;
@@ -107,6 +125,7 @@ int main(int argc, char **argv) {
         else LOG("[3j] post-draw capture skipped (buffer changed or implausible)\n");
     }
     glFinish(); rd(after);
+    if (g_tex) pr("after", g_all);
     LOG("[3j] after: %d,%d,%d,%d  (baseline was %d,%d,%d,%d)\n", after[0], after[1], after[2], after[3], base0[0], base0[1], base0[2], base0[3]);
     /* the context must still work normally afterwards */
     unsigned char again[4]; glClearColor(0.0f, 1.0f, 0.0f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); glFinish(); rd(again);

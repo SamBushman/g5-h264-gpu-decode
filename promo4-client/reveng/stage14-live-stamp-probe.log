@@ -1,0 +1,14 @@
+[3n] stamp page 0xcd000, initial stamp 0x5c17
+[3n] 200 reps. A glFinish:            wall 0.129 ms/rep, cpu 0.029 ms/rep
+[3n]        B glFlush+poll stamp:  wall 0.018 ms/rep, cpu 0.018 ms/rep (avg 1 spins, 0 timeouts), final stamp 0x5f37
+[3n] stamp page 0xcd000, initial stamp 0x5f3b
+[3n] 200 reps. A glFinish:            wall 0.129 ms/rep, cpu 0.029 ms/rep
+[3n]        B glFlush+poll stamp:  wall 0.018 ms/rep, cpu 0.018 ms/rep (avg 0 spins, 0 timeouts), final stamp 0x625b
+[3n] stamp page 0xcd000, initial stamp 0x625f
+[3n] 200 reps. A glFinish:            wall 0.129 ms/rep, cpu 0.029 ms/rep
+[3n]        B glFlush+poll stamp:  wall 0.018 ms/rep, cpu 0.018 ms/rep (avg 0 spins, 0 timeouts), final stamp 0x657f
+[3n] stamp page 0xcd000, initial stamp 0x658c
+[3n] 20 reps. A glFinish:            wall 14.905 ms/rep, cpu 0.457 ms/rep
+[3n]        B glFlush+poll stamp:  wall 7.423 ms/rep, cpu 7.423 ms/rep (avg 66361 spins, 0 timeouts), final stamp 0x65cd
+[3n] HEAVY: flush returned after 0.218 ms, stamp changed after 0.219 ms; remaining glFinish 0.239 ms
+[3n] HEAVY: full draw+glFinish = 15.091 ms

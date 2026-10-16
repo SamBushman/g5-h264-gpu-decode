@@ -28,3 +28,16 @@ BUF+0x20; submitted words == intended PM4 (+pad); record length within the REAL 
 
 ## Not covered by layer 1
 What the GPU does with the words (register effects, engine wedge, DART faults). That is layers 2-4 and the staged live run.
+
+## Validation against a REAL stock GL buffer (2026-10-16, G5, read-only recorder run)
+`DYLD_INSERT_LIBRARIES=opcode_recorder.dylib OPCODE_DUMP=6` on the stock `cgl_probe` (capture committed beside this file). First flush, buffer 0x20000:
+```
++0x00..0x0c  0 0 0 0           (header, zeroed)
++0x10        0x00007c52        (capacity/cursor-ish field, not used by the framing)
++0x1c        0x0000010b        <- first record header: opcode 0, length 267 dwords, OUTSIDE the submit range
++0x20        00001181 00000000 00001189 00000000 00001188 00000000 0000118c 00000000 ...   <- PM4: Type-0 count-0 (reg index, value) pairs
+```
+This is exactly the layer-1 model: one opcode-0 record at +0x1c, PM4 from +0x20 as Type-0 `(index,value)` pairs (0x1181 = US_PIXSIZE, 0x1189 = US_FC_CTRL, 0x118c = US_CODE_ADDR ...). The second capture starts with a 1-word record at +0x1c (`0x00000001`, what `init_command_buffer_header` leaves) followed by a special opcode (`0x28000009`) at +0x20 that the kernel handler rewrites. Both match the emulator's walk.
+
+## Layer 3 (R5xx fragment ISA interpreter) - `tools/promo4_sim/r5xx_us.py`
+Decoder + single-pixel interpreter from the AMD R5xx doc v1.5 field tables. Ground truth: it reproduces, from the same instruction words, the two programs `stage3_native_shader.c` ran on real hardware (red (1,0,0,1), blue (0,0,1,1)); `test_r5xx_us.py` also checks MAD, swizzle/inline-constant decode (the doc's "1.0" table row is garbled in extraction: with bias 7, 1.0 is exp 7 = 0xB8 as an address byte). Unsupported (raises, never guesses): flow control, predication, relative addressing, MDH/MDV, texture-semaphore timing. float32 arithmetic; hardware is FP24 in places, so a match proves logic, not bit-exact precision.

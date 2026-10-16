@@ -81,7 +81,8 @@ int main(int argc, char **argv) {
     const char *stage = getenv("STAGE") ? getenv("STAGE") : "full";
     if (strcmp(stage, "nodeblock") == 0 || strcmp(stage, "entropy") == 0) ctx->skip_loop_filter = AVDISCARD_ALL;
     if (strcmp(stage, "entropy") == 0) ff_x1900_set_mb_hook(null_hook, NULL);
-    ctx->thread_count = 1;
+    ctx->thread_count = getenv("THREADS") ? atoi(getenv("THREADS")) : 1;
+    if (ctx->thread_count > 1) ctx->thread_type = getenv("TTYPE") && atoi(getenv("TTYPE")) == 1 ? FF_THREAD_SLICE : FF_THREAD_FRAME;
     if (avcodec_open2(ctx, codec, NULL) < 0) {
         fprintf(stderr, "avcodec_open2 failed\n");
         return 1;

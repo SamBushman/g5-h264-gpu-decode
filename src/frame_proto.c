@@ -143,7 +143,7 @@ static int classify(int mvx, int mvy) {
 }
 
 static const char *fs_res =
-"uniform sampler2DRect predTex; uniform sampler2DRect coefTex;\n"
+"uniform sampler2DRect coefTex; uniform sampler2DRect idxTex; uniform sampler2DRect predTex;\n"
 "vec4 stage1(vec4 v) {   /* one column's 4 coefficients (rows 0..3) -> its 4 transformed values */\n"
 "  vec4 h = floor(v * 0.5);\n"
 "  float z0 = v.x + v.z, z1 = v.x - v.z, z2 = h.y - v.w, z3 = v.y + h.w;\n"
@@ -153,19 +153,24 @@ static const char *fs_res =
 "void main() {\n"
 "  vec2 fc = floor(gl_FragCoord.xy);\n"
 "  vec2 blk = floor(fc * 0.25); vec2 loc = fc - blk * 4.0;\n"
-"  float yb = blk.y * 4.0 + 0.5, xb = blk.x + 0.5;\n"
+"  float id = floor(texture2DRect(idxTex, blk + vec2(0.5)).r + 0.5);\n"
+"  float lin = id * 4.0; float ry = floor(lin * 0.00048828125); float rx = lin - ry * 2048.0;\n"
+"  vec2 b = vec2(rx + 0.5, ry + 0.5);\n"
 "  vec4 oh = onehot(loc.y);\n"
-"  vec4 m0 = stage1(texture2DRect(coefTex, vec2(xb, yb)));\n"
-"  vec4 m1 = stage1(texture2DRect(coefTex, vec2(xb, yb + 1.0)));\n"
-"  vec4 m2 = stage1(texture2DRect(coefTex, vec2(xb, yb + 2.0)));\n"
-"  vec4 m3 = stage1(texture2DRect(coefTex, vec2(xb, yb + 3.0)));\n"
+"  vec4 m0 = stage1(texture2DRect(coefTex, b));\n"
+"  vec4 m1 = stage1(texture2DRect(coefTex, b + vec2(1.0, 0.0)));\n"
+"  vec4 m2 = stage1(texture2DRect(coefTex, b + vec2(2.0, 0.0)));\n"
+"  vec4 m3 = stage1(texture2DRect(coefTex, b + vec2(3.0, 0.0)));\n"
 "  float a0 = dot(m0, oh), a1 = dot(m1, oh), a2 = dot(m2, oh), a3 = dot(m3, oh);\n"
 "  float z0 = a0 + a2, z1 = a0 - a2, z2 = floor(a1 * 0.5) - a3, z3 = a1 + floor(a3 * 0.5);\n"
 "  vec4 o = vec4(z0 + z3, z1 + z2, z1 - z2, z0 - z3);\n"
 "  float res = floor((dot(o, onehot(loc.x)) + 32.0) * 0.015625);\n"
-"  float pr = texture2DRect(predTex, fc + vec2(0.5)).r * 255.0;\n"
-"  gl_FragColor = vec4(clamp((pr + res) / 255.0, 0.0, 1.0), 0.0, 0.0, 1.0);\n"
+"  float pr = floor(texture2DRect(predTex, fc + vec2(0.5)).r * 255.0 + 0.5);\n"
+"  gl_FragColor = vec4(clamp(pr + res, 0.0, 255.0) * 0.00392156862745098, 0.0, 0.0, 1.0);\n"
 "}\n";
+static const char *fs_present =
+"uniform sampler2DRect finalTex;\n"
+"void main() { gl_FragColor = texture2DRect(finalTex, floor(gl_FragCoord.xy) + vec2(0.5)); }\n";
 
 int main(int argc, char **argv) {
     if (argc >= 3) { W = atoi(argv[1]); H = atoi(argv[2]); }
@@ -206,6 +211,18 @@ int main(int argc, char **argv) {
     }
     printf("CPU reference (naive C, not a performance figure): %.0f ms\n", now_ms() - t0);
 
+    /* sparse coefficient atlas: only coded 4x4 blocks, 4 texels (columns) each, 2048 texels per row; idxTex maps block -> atlas id */
+    int ncod = 0; float *idxf = malloc(nbx4 * nby4 * sizeof(float));
+    for (i = 0; i < nbx4 * nby4; i++) { int any = 0, k; for (k = 0; k < 16; k++) if (coefi[i * 16 + k]) any = 1; idxf[i] = any ? (float)ncod++ : -1.0f; }
+    int arows = (ncod * 4 + 2047) / 2048; float *atlas = calloc(2048 * arows * 4, sizeof(float));
+    float *cverts = malloc(ncod * 8 * sizeof(float)); int cq = 0;
+    for (y = 0; y < nby4; y++) for (x = 0; x < nbx4; x++) if (idxf[y * nbx4 + x] >= 0) {
+        int id = (int)idxf[y * nbx4 + x], j, r;
+        for (j = 0; j < 4; j++) for (r = 0; r < 4; r++) atlas[((id * 4 + j)) * 4 + r] = (float)coefi[(y * nbx4 + x) * 16 + r * 4 + j];
+        float *v = cverts + cq++ * 8, x0 = x * 4, y0 = y * 4; v[0] = x0; v[1] = y0; v[2] = x0 + 4; v[3] = y0; v[4] = x0 + 4; v[5] = y0 + 4; v[6] = x0; v[7] = y0 + 4;
+    }
+    printf("sparse atlas: %d coded blocks -> %dx%d RGBA32F = %.2f MB (dense was %.1f MB)\n", ncod, 2048, arows, 2048 * arows * 16.0 / 1048576.0, nbx4 * nby4 * 4 * 16.0 / 1048576.0);
+
     /* GL setup */
     GLint attribs[] = {AGL_RGBA, AGL_RED_SIZE, 8, AGL_GREEN_SIZE, 8, AGL_BLUE_SIZE, 8, AGL_ALPHA_SIZE, 8, AGL_NONE};
     AGLPixelFormat pf = aglChoosePixelFormat(NULL, 0, attribs);
@@ -215,30 +232,30 @@ int main(int argc, char **argv) {
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1); glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_DITHER);
 
-    GLuint tex[4]; glGenTextures(4, tex);       /* 0 ref, 1 mv, 2 coef, 3 pred */
+    GLuint tex[6]; glGenTextures(6, tex);       /* 0 ref, 1 mv, 2 atlas, 3 final (FBO), 4 idx */
     GLenum T = GL_TEXTURE_RECTANGLE_ARB;
-    glBindTexture(T, tex[0]); glTexParameteri(T, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(T, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(T, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(T, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(T, 0, GL_LUMINANCE8, W, H, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, ref);
+    #define NEAREST() do { glTexParameteri(T, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(T, GL_TEXTURE_MAG_FILTER, GL_NEAREST); \
+        glTexParameteri(T, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(T, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); } while (0)
+    glBindTexture(T, tex[0]); NEAREST(); glTexImage2D(T, 0, GL_LUMINANCE8, W, H, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, ref);
     float *mvf = malloc(nbx8 * nby8 * 4 * sizeof(float));
     for (i = 0; i < nbx8 * nby8; i++) { mvf[i * 4] = (float)mvx8[i]; mvf[i * 4 + 1] = (float)mvy8[i]; mvf[i * 4 + 2] = 0; mvf[i * 4 + 3] = 0; }
-    glBindTexture(T, tex[1]); glTexParameteri(T, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(T, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D(T, 0, GL_RGBA_FLOAT32_ATI, nbx8, nby8, 0, GL_RGBA, GL_FLOAT, mvf);
-    glBindTexture(T, tex[2]); glTexParameteri(T, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(T, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D(T, 0, GL_RGBA_FLOAT32_ATI, nbx4, nby4 * 4, 0, GL_RGBA, GL_FLOAT, coefp);
-    glBindTexture(T, tex[3]); glTexParameteri(T, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(T, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D(T, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindTexture(T, tex[1]); NEAREST(); glTexImage2D(T, 0, GL_RGBA_FLOAT32_ATI, nbx8, nby8, 0, GL_RGBA, GL_FLOAT, mvf);
+    glBindTexture(T, tex[2]); NEAREST(); glTexImage2D(T, 0, GL_RGBA_FLOAT32_ATI, 2048, arows, 0, GL_RGBA, GL_FLOAT, atlas);
+    glBindTexture(T, tex[3]); NEAREST(); glTexImage2D(T, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindTexture(T, tex[4]); NEAREST(); glTexImage2D(T, 0, GL_LUMINANCE_FLOAT32_ATI, nbx4, nby4, 0, GL_LUMINANCE, GL_FLOAT, idxf);
+    glBindTexture(T, tex[5]); NEAREST(); glTexImage2D(T, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     GLuint fbo; glGenFramebuffersEXT(1, &fbo); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, T, tex[3], 0);
     if (glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT) { fprintf(stderr, "FBO incomplete\n"); return 1; }
+    GLuint fbo2; glGenFramebuffersEXT(1, &fbo2); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo2);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, T, tex[5], 0);
+    if (glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT) { fprintf(stderr, "FBO2 incomplete\n"); return 1; }
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
 
-    /* programs */
-    GLhandleARB mcp[9], resp; char *src = malloc(16384);
+    GLhandleARB mcp[9], resp, prp; char *src = malloc(16384);
     for (i = 0; i < 9; i++) { snprintf(src, 16384, "%s%s", mc_common, mc_body[i]); mcp[i] = linkp(src); }
-    resp = linkp(fs_res);
+    resp = linkp(fs_res); prp = linkp(fs_present);
 
-    /* per-class vertex lists (8x8 quads) */
     float *verts[9]; int nq[9] = {0}; for (i = 0; i < 9; i++) verts[i] = malloc(nbx8 * nby8 * 8 * sizeof(float));
     for (y = 0; y < nby8; y++) for (x = 0; x < nbx8; x++) {
         int c = classify(mvx8[y * nbx8 + x], mvy8[y * nbx8 + x]); float *v = verts[c] + nq[c]++ * 8;
@@ -254,14 +271,27 @@ int main(int argc, char **argv) {
             glUseProgramObjectARB(mcp[i]); glUniform1iARB(glGetUniformLocationARB(mcp[i], "refTex"), 0); glUniform1iARB(glGetUniformLocationARB(mcp[i], "mvTex"), 1); \
             glVertexPointer(2, GL_FLOAT, 0, verts[i]); glDrawArrays(GL_QUADS, 0, nq[i] * 4); } \
         glDisableClientState(GL_VERTEX_ARRAY); } while (0)
-    #define DRAW_RES() do { \
-        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0); glViewport(0, 0, W, H); \
-        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[3]); glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[2]); \
-        glUseProgramObjectARB(resp); glUniform1iARB(glGetUniformLocationARB(resp, "predTex"), 0); glUniform1iARB(glGetUniformLocationARB(resp, "coefTex"), 1); \
+    #define DRAW_COPY() do { \
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo2); glViewport(0, 0, W, H); \
+        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[3]); glUseProgramObjectARB(prp); glUniform1iARB(glGetUniformLocationARB(prp, "finalTex"), 0); \
         glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H); glEnd(); } while (0)
+    #define DRAW_RES() do { \
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo2); glViewport(0, 0, W, H); \
+        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[2]); glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[4]); glActiveTexture(GL_TEXTURE2); glBindTexture(T, tex[3]); \
+        glUseProgramObjectARB(resp); glUniform1iARB(glGetUniformLocationARB(resp, "coefTex"), 0); glUniform1iARB(glGetUniformLocationARB(resp, "idxTex"), 1); glUniform1iARB(glGetUniformLocationARB(resp, "predTex"), 2); \
+        glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 0, cverts); glDrawArrays(GL_QUADS, 0, cq * 4); glDisableClientState(GL_VERTEX_ARRAY); } while (0)
+    #define DRAW_PRESENT() do { \
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0); glViewport(0, 0, W, H); \
+        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[5]); glUseProgramObjectARB(prp); glUniform1iARB(glGetUniformLocationARB(prp, "finalTex"), 0); \
+        glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H); glEnd(); } while (0)
+    #define UPLOAD() do { \
+        glActiveTexture(GL_TEXTURE0); \
+        glBindTexture(T, tex[1]); glTexSubImage2D(T, 0, 0, 0, nbx8, nby8, GL_RGBA, GL_FLOAT, mvf); \
+        glBindTexture(T, tex[2]); glTexSubImage2D(T, 0, 0, 0, 2048, arows, GL_RGBA, GL_FLOAT, atlas); \
+        glBindTexture(T, tex[4]); glTexSubImage2D(T, 0, 0, 0, nbx4, nby4, GL_LUMINANCE, GL_FLOAT, idxf); } while (0)
 
-    /* ---- correctness: one full run, then read back the default framebuffer ---- */
-    DRAW_MC(); DRAW_RES(); glFinish();
+    /* ---- correctness ---- */
+    DRAW_MC(); DRAW_COPY(); DRAW_RES(); DRAW_PRESENT(); glFinish();
     uint8_t *rb = malloc(W * H * 4); glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, rb);
     long bad = 0, bad2 = 0, maxd = 0; long perclass_bad[9] = {0};
     for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
@@ -271,25 +301,37 @@ int main(int argc, char **argv) {
     printf("VERIFY vs CPU reference: %ld/%d pixels differ (%.4f%%), %ld differ by >1, max diff %ld\n", bad, W * H, 100.0 * bad / (W * H), bad2, maxd);
     printf("  mismatches by MC class:"); for (i = 0; i < 9; i++) printf(" c%d=%ld", i, perclass_bad[i]); printf("\n");
 
-    /* ---- timing ---- */
-    double tUp = 0, tMC = 0, tRES = 0, tAll = 0; int it;
+    /* ---- timing (per-phase with a finish after each, then end-to-end with ONE finish) ---- */
+    double tUp = 0, tMC = 0, tRES = 0, tPR = 0, tAll = 0; int it;
     for (it = 0; it < iters; it++) {
-        double a = now_ms();
-        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[1]); glTexSubImage2D(T, 0, 0, 0, nbx8, nby8, GL_RGBA, GL_FLOAT, mvf);
-        glBindTexture(T, tex[2]); glTexSubImage2D(T, 0, 0, 0, nbx4, nby4 * 4, GL_RGBA, GL_FLOAT, coefp); glFinish();
+        double a = now_ms(); UPLOAD(); glFinish();
         double b = now_ms(); DRAW_MC(); glFinish();
-        double c = now_ms(); DRAW_RES(); glFinish();
-        double d = now_ms(); tUp += b - a; tMC += c - b; tRES += d - c;
+        double c = now_ms(); DRAW_COPY(); DRAW_RES(); glFinish();
+        double d = now_ms(); DRAW_PRESENT(); glFinish();
+        double e = now_ms(); tUp += b - a; tMC += c - b; tRES += d - c; tPR += e - d;
     }
-    for (it = 0; it < iters; it++) {        /* end to end: uploads + both passes + ONE finish */
-        double a = now_ms();
-        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[1]); glTexSubImage2D(T, 0, 0, 0, nbx8, nby8, GL_RGBA, GL_FLOAT, mvf);
-        glBindTexture(T, tex[2]); glTexSubImage2D(T, 0, 0, 0, nbx4, nby4 * 4, GL_RGBA, GL_FLOAT, coefp);
-        DRAW_MC(); DRAW_RES(); glFinish(); tAll += now_ms() - a;
+    for (it = 0; it < iters; it++) { double a = now_ms(); UPLOAD(); DRAW_MC(); DRAW_COPY(); DRAW_RES(); DRAW_PRESENT(); glFinish(); tAll += now_ms() - a; }
+    printf("TIMING (ms/frame, %d iters): upload %.2f | MC %.2f | copy+RES(single pass, coded only) %.2f | present %.2f | sum %.2f | end-to-end single-finish %.2f\n",
+           iters, tUp / iters, tMC / iters, tRES / iters, tPR / iters, (tUp + tMC + tRES + tPR) / iters, tAll / iters);
+    if (getenv("PROFILE")) {
+        /* per MC class cost: draw only that class, finish, average */
+        int reps = 10, c;
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo); glViewport(0, 0, W, H);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[0]); glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[1]);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        printf("MC per-class (ms, px, ns/px):\n");
+        for (c = 0; c < 9; c++) if (nq[c]) {
+            double a = now_ms(); int r;
+            for (r = 0; r < reps; r++) { glUseProgramObjectARB(mcp[c]); glUniform1iARB(glGetUniformLocationARB(mcp[c], "refTex"), 0); glUniform1iARB(glGetUniformLocationARB(mcp[c], "mvTex"), 1);
+                glVertexPointer(2, GL_FLOAT, 0, verts[c]); glDrawArrays(GL_QUADS, 0, nq[c] * 4); glFinish(); }
+            double ms = (now_ms() - a) / reps; printf("  c%d: %.2f ms, %d px, %.1f ns/px\n", c, ms, nq[c] * 64, ms * 1e6 / (nq[c] * 64));
+        }
+        glDisableClientState(GL_VERTEX_ARRAY);
+        /* floor: empty-ish full-frame copy for fill-rate reference */
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0); glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[3]); glUseProgramObjectARB(prp); glUniform1iARB(glGetUniformLocationARB(prp, "finalTex"), 0);
+        double a = now_ms(); int r; for (r = 0; r < reps; r++) { glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H); glEnd(); glFinish(); }
+        printf("full-frame copy (fill-rate reference, 2.1 Mpx): %.2f ms\n", (now_ms() - a) / reps);
     }
-    printf("TIMING (ms/frame, %d iters): upload mv+coef %.2f | MC %.2f | RES %.2f | sum %.2f | end-to-end single-finish %.2f\n",
-           iters, tUp / iters, tMC / iters, tRES / iters, (tUp + tMC + tRES) / iters, tAll / iters);
-    printf("(coef texture %.1f MB RGBA32F; deblock and chroma not included - see notes)\n", nbx4 * nby4 * 4 * 16.0 / 1048576.0);
     aglSetCurrentContext(NULL); aglDestroyContext(ctx);
     return 0;
 }

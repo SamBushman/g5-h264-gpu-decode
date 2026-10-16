@@ -99,8 +99,21 @@ static GLhandleARB linkp(const char *fs) {
     return p;
 }
 
+static const char *vs_sprite = "varying vec2 ctr; void main(){ ctr = gl_Vertex.xy; gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex; }";
+static GLhandleARB linkps(const char *fs) {
+    GLhandleARB p = glCreateProgramObjectARB();
+    glAttachObjectARB(p, compile(GL_VERTEX_SHADER_ARB, vs_sprite)); glAttachObjectARB(p, compile(GL_FRAGMENT_SHADER_ARB, fs)); glLinkProgramARB(p);
+    GLint ok = 0; glGetObjectParameterivARB(p, GL_OBJECT_LINK_STATUS_ARB, &ok);
+    if (!ok) { char log[4096]; GLsizei n; glGetInfoLogARB(p, sizeof log, &n, log); fprintf(stderr, "link fail:\n%s\n", log); exit(1); }
+    return p;
+}
 /* MC shader, parametrised by phase class (see classify()). Common prologue fetches the 8x8 block's MV and positions p at the integer ref pixel. */
 static const char *mc_common =
+"varying vec2 ctr;\n"
+"vec2 pixpos(float size) {   /* window pixel of this fragment of a size x size point sprite centred at ctr (gl_FragCoord is the sprite CENTRE on this driver) */\n"
+"  vec2 o = floor(gl_TexCoord[0].xy * size + 0.01);   /* this driver: sprite t increases with window y (lower-left origin), gl_FragCoord is NOT per-fragment for points */\n"
+"  return floor(ctr + 0.5) - vec2(size * 0.5) + o;\n"
+"}\n"
 "uniform sampler2DRect refTex; uniform sampler2DRect mvTex;\n"
 "vec2 p; float fx; float fy;\n"
 "#define RF(dx,dy) (texture2DRect(refTex, vec2(p.x + (dx), p.y + (dy))).r * 255.0)\n"
@@ -113,7 +126,7 @@ static const char *mc_common =
 "#define CENTERJ CLIP(floor(((TAPH(0.0,0.0)+TAPH(0.0,1.0))*20.0 - (TAPH(0.0,-1.0)+TAPH(0.0,2.0))*5.0 + TAPH(0.0,-2.0) + TAPH(0.0,3.0) + 512.0)*0.0009765625))\n"
 "#define AVG(a,b) floor(((a) + (b) + 1.0) * 0.5)\n"
 "void setup() {\n"
-"  vec2 fc = floor(gl_FragCoord.xy);\n"
+"  vec2 fc = pixpos(8.0);\n"
 "  vec2 mv = texture2DRect(mvTex, vec2(floor(fc.x*0.125)+0.5, floor(fc.y*0.125)+0.5)).rg;\n"
 "  vec2 ip = floor(mv * 0.25); fx = mv.x - 4.0*ip.x; fy = mv.y - 4.0*ip.y;\n"
 "  p = fc + ip + vec2(0.5);\n"
@@ -143,6 +156,11 @@ static int classify(int mvx, int mvy) {
 }
 
 static const char *fs_res =
+"varying vec2 ctr;\n"
+"vec2 pixpos(float size) {   /* window pixel of this fragment of a size x size point sprite centred at ctr (gl_FragCoord is the sprite CENTRE on this driver) */\n"
+"  vec2 o = floor(gl_TexCoord[0].xy * size + 0.01);   /* this driver: sprite t increases with window y (lower-left origin), gl_FragCoord is NOT per-fragment for points */\n"
+"  return floor(ctr + 0.5) - vec2(size * 0.5) + o;\n"
+"}\n"
 "uniform sampler2DRect coefTex; uniform sampler2DRect idxTex; uniform sampler2DRect predTex;\n"
 "vec4 stage1(vec4 v) {   /* one column's 4 coefficients (rows 0..3) -> its 4 transformed values */\n"
 "  vec4 h = floor(v * 0.5);\n"
@@ -151,7 +169,7 @@ static const char *fs_res =
 "}\n"
 "vec4 onehot(float k) { return max(vec4(0.0), vec4(1.0) - abs(vec4(0.0,1.0,2.0,3.0) - k)); }\n"
 "void main() {\n"
-"  vec2 fc = floor(gl_FragCoord.xy);\n"
+"  vec2 fc = pixpos(4.0);\n"
 "  vec2 blk = floor(fc * 0.25); vec2 loc = fc - blk * 4.0;\n"
 "  float id = floor(texture2DRect(idxTex, blk + vec2(0.5)).r + 0.5);\n"
 "  float lin = id * 4.0; float ry = floor(lin * 0.00048828125); float rx = lin - ry * 2048.0;\n"
@@ -168,6 +186,50 @@ static const char *fs_res =
 "  float pr = floor(texture2DRect(predTex, fc + vec2(0.5)).r * 255.0 + 0.5);\n"
 "  gl_FragColor = vec4(clamp(pr + res, 0.0, 255.0) * 0.00392156862745098, 0.0, 0.0, 1.0);\n"
 "}\n";
+/* Luma deblock, bS<4 filter (H.264 8.7.2.3), one pass per direction. COST STAND-IN: parameters are synthetic (alpha/beta/tc0 fixed per edge from a texture)
+ * and the left-to-right dependency chain between neighbouring edges is NOT reproduced, so the output is not bit-exact vs the spec ordering. Each fragment
+ * handles the single edge that can modify it (4x4 edges: pixel at offset r from edge in {-2,-1,0,1}). */
+static const char *fs_deblock =
+"varying vec2 ctr;\n"
+"vec2 pixpos(float size) {   /* window pixel of this fragment of a size x size point sprite centred at ctr (gl_FragCoord is the sprite CENTRE on this driver) */\n"
+"  vec2 o = floor(gl_TexCoord[0].xy * size + 0.01);   /* this driver: sprite t increases with window y (lower-left origin), gl_FragCoord is NOT per-fragment for points */\n"
+"  return floor(ctr + 0.5) - vec2(size * 0.5) + o;\n"
+"}\n"
+"uniform sampler2DRect srcTex; uniform sampler2DRect prmTex; uniform float dir;\n"
+"#define S(k) floor(texture2DRect(srcTex, base + s * (k)).r * 255.0 + 0.5)\n"
+"void main() {\n"
+"  vec2 fc = pixpos(4.0); vec2 s = vec2(1.0 - dir, dir);\n"
+"  float a = dot(fc, s); float x0 = floor((a + 2.0) * 0.25) * 4.0; float r = a - x0;\n"
+"  vec2 base = fc - s * r;\n"
+"  vec4 prm = floor(texture2DRect(prmTex, floor(base * 0.25) + vec2(0.5)) * 255.0 + 0.5);\n"
+"  float alpha = prm.x, beta = prm.y, tc0 = prm.z;\n"
+"  float p2 = S(-3.0), p1 = S(-2.0), p0 = S(-1.0), q0 = S(0.0), q1 = S(1.0), q2 = S(2.0);\n"
+"  float fil = step(abs(p0 - q0), alpha - 0.5) * step(abs(p1 - p0), beta - 0.5) * step(abs(q1 - q0), beta - 0.5);\n"
+"  float ap = step(abs(p2 - p0), beta - 0.5), aq = step(abs(q2 - q0), beta - 0.5);\n"
+"  float tc = tc0 + ap + aq;\n"
+"  float delta = clamp(floor((((q0 - p0) * 4.0) + (p1 - q1) + 4.0) * 0.125), -tc, tc);\n"
+"  float np0 = clamp(p0 + delta, 0.0, 255.0), nq0 = clamp(q0 - delta, 0.0, 255.0);\n"
+"  float np1 = p1 + ap * clamp(floor((p2 + floor((p0 + q0 + 1.0) * 0.5) - p1 * 2.0) * 0.5), -tc0, tc0);\n"
+"  float nq1 = q1 + aq * clamp(floor((q2 + floor((p0 + q0 + 1.0) * 0.5) - q1 * 2.0) * 0.5), -tc0, tc0);\n"
+"  float cur = (r < -1.5) ? p1 : ((r < -0.5) ? p0 : ((r < 0.5) ? q0 : q1));\n"
+"  float flt = (r < -1.5) ? np1 : ((r < -0.5) ? np0 : ((r < 0.5) ? nq0 : nq1));\n"
+"  float outv = mix(cur, flt, fil);\n"
+"  gl_FragColor = vec4(outv * 0.00392156862745098, 0.0, 0.0, 1.0);\n"
+"}\n";
+static const char *fs_deblock_fetchonly =
+"uniform sampler2DRect srcTex; uniform sampler2DRect prmTex; uniform float dir;\n"
+"#define S(k) floor(texture2DRect(srcTex, base + s * (k)).r * 255.0 + 0.5)\n"
+"void main() {\n"
+"  vec2 fc = floor(gl_FragCoord.xy); vec2 s = vec2(1.0 - dir, dir);\n"
+"  float a = dot(fc, s); float x0 = floor((a + 2.0) * 0.25) * 4.0; float r = a - x0;\n"
+"  vec2 base = fc - s * r;\n"
+"  vec4 prm = floor(texture2DRect(prmTex, floor(base * 0.25) + vec2(0.5)) * 255.0 + 0.5);\n"
+"  float v = S(-3.0) + S(-2.0) + S(-1.0) + S(0.0) + S(1.0) + S(2.0) + prm.x;\n"
+"  gl_FragColor = vec4(v * 0.0005, 0.0, 0.0, 1.0);\n"
+"}\n";
+static const char *fs_deblock_oneFetch =
+"uniform sampler2DRect srcTex; uniform sampler2DRect prmTex; uniform float dir;\n"
+"void main() { vec2 fc = floor(gl_FragCoord.xy); gl_FragColor = vec4(texture2DRect(srcTex, fc + vec2(0.5)).r, 0.0, 0.0, 1.0); }\n";
 static const char *fs_present =
 "uniform sampler2DRect finalTex;\n"
 "void main() { gl_FragColor = texture2DRect(finalTex, floor(gl_FragCoord.xy) + vec2(0.5)); }\n";
@@ -175,7 +237,7 @@ static const char *fs_present =
 int main(int argc, char **argv) {
     if (argc >= 3) { W = atoi(argv[1]); H = atoi(argv[2]); }
     int iters = argc >= 4 ? atoi(argv[3]) : 20;
-    int nbx8 = W / 8, nby8 = H / 8, nbx4 = W / 4, nby4 = H / 4, i, x, y;
+    int nbx8 = W / 8, nby8 = H / 8, nbx4 = W / 4, nby4 = H / 4, i, x, y, bx_, by_;
     ref = malloc(W * H); cpu_out = malloc(W * H);
     mvx8 = malloc(nbx8 * nby8 * sizeof(int)); mvy8 = malloc(nbx8 * nby8 * sizeof(int));
     coefi = calloc(nbx4 * nby4 * 16, sizeof(int)); coefp = calloc(nbx4 * nby4 * 16, sizeof(float));
@@ -215,11 +277,11 @@ int main(int argc, char **argv) {
     int ncod = 0; float *idxf = malloc(nbx4 * nby4 * sizeof(float));
     for (i = 0; i < nbx4 * nby4; i++) { int any = 0, k; for (k = 0; k < 16; k++) if (coefi[i * 16 + k]) any = 1; idxf[i] = any ? (float)ncod++ : -1.0f; }
     int arows = (ncod * 4 + 2047) / 2048; float *atlas = calloc(2048 * arows * 4, sizeof(float));
-    float *cverts = malloc(ncod * 8 * sizeof(float)); int cq = 0;
+    float *cverts = malloc(ncod * 2 * sizeof(float)); int cq = 0;
     for (y = 0; y < nby4; y++) for (x = 0; x < nbx4; x++) if (idxf[y * nbx4 + x] >= 0) {
         int id = (int)idxf[y * nbx4 + x], j, r;
         for (j = 0; j < 4; j++) for (r = 0; r < 4; r++) atlas[((id * 4 + j)) * 4 + r] = (float)coefi[(y * nbx4 + x) * 16 + r * 4 + j];
-        float *v = cverts + cq++ * 8, x0 = x * 4, y0 = y * 4; v[0] = x0; v[1] = y0; v[2] = x0 + 4; v[3] = y0; v[4] = x0 + 4; v[5] = y0 + 4; v[6] = x0; v[7] = y0 + 4;
+        float *v = cverts + cq++ * 2; v[0] = x * 4 + 2; v[1] = y * 4 + 2;
     }
     printf("sparse atlas: %d coded blocks -> %dx%d RGBA32F = %.2f MB (dense was %.1f MB)\n", ncod, 2048, arows, 2048 * arows * 16.0 / 1048576.0, nbx4 * nby4 * 4 * 16.0 / 1048576.0);
 
@@ -231,8 +293,9 @@ int main(int argc, char **argv) {
     aglSetPBuffer(ctx, pbuf, 0, 0, 0); aglSetCurrentContext(ctx);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1); glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_DITHER);
+    glActiveTexture(GL_TEXTURE0); glTexEnvi(GL_POINT_SPRITE_ARB, GL_COORD_REPLACE_ARB, GL_TRUE); glEnable(GL_POINT_SPRITE_ARB);
 
-    GLuint tex[6]; glGenTextures(6, tex);       /* 0 ref, 1 mv, 2 atlas, 3 final (FBO), 4 idx */
+    GLuint tex[10]; glGenTextures(10, tex);       /* 0 ref, 1 mv, 2 atlas, 3 final (FBO), 4 idx */
     GLenum T = GL_TEXTURE_RECTANGLE_ARB;
     #define NEAREST() do { glTexParameteri(T, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(T, GL_TEXTURE_MAG_FILTER, GL_NEAREST); \
         glTexParameteri(T, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(T, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); } while (0)
@@ -247,29 +310,55 @@ int main(int argc, char **argv) {
     GLuint fbo; glGenFramebuffersEXT(1, &fbo); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, T, tex[3], 0);
     if (glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT) { fprintf(stderr, "FBO incomplete\n"); return 1; }
+    /* synthetic edge strengths: bS=2 if either neighbouring 4x4 block is coded, else 1 if the 8x8 MVs differ, else 0 */
+    uint8_t *prmV = calloc(nbx4 * nby4 * 4, 1), *prmH = calloc(nbx4 * nby4 * 4, 1); float *ev = malloc(nbx4 * nby4 * 2 * sizeof(float)), *eh = malloc(nbx4 * nby4 * 2 * sizeof(float)); int nev = 0, neh = 0;
+    for (y = 0; y < nby4; y++) for (x = 0; x < nbx4; x++) {
+        int cur = idxf[y * nbx4 + x] >= 0, k;
+        for (k = 0; k < 2; k++) {                       /* 0: vertical edge (left of block), 1: horizontal edge (top of block) */
+            int nx = x - (k == 0), ny = y - (k == 1); if (nx < 0 || ny < 0) continue;
+            int nb = idxf[ny * nbx4 + nx] >= 0, bs = 0;
+            if (cur || nb) bs = 2; else if (mvx8[(y / 2) * nbx8 + x / 2] != mvx8[(ny / 2) * nbx8 + nx / 2] || mvy8[(y / 2) * nbx8 + x / 2] != mvy8[(ny / 2) * nbx8 + nx / 2]) bs = 1;
+            if (!bs) continue;
+            uint8_t *pp = (k == 0 ? prmV : prmH) + (y * nbx4 + x) * 4; pp[0] = 15; pp[1] = 6; pp[2] = (uint8_t)(bs == 1 ? 0 : 1); pp[3] = (uint8_t)bs;
+            if (k == 0) { float *v = ev + nev++ * 2; v[0] = x * 4; v[1] = y * 4 + 2; }
+            else { float *v = eh + neh++ * 2; v[0] = x * 4 + 2; v[1] = y * 4; }
+        }
+    }
+    printf("deblock edges with bS>0: %d vertical + %d horizontal of %d possible each\n", nev, neh, nbx4 * nby4);
+    glBindTexture(T, tex[6]); NEAREST(); glTexImage2D(T, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindTexture(T, tex[7]); NEAREST(); glTexImage2D(T, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindTexture(T, tex[8]); NEAREST(); glTexImage2D(T, 0, GL_RGBA8, nbx4, nby4, 0, GL_RGBA, GL_UNSIGNED_BYTE, prmV);
+    glBindTexture(T, tex[9]); NEAREST(); glTexImage2D(T, 0, GL_RGBA8, nbx4, nby4, 0, GL_RGBA, GL_UNSIGNED_BYTE, prmH);
+    GLuint fbo3, fbo4; glGenFramebuffersEXT(1, &fbo3); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo3); glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, T, tex[6], 0);
+    glGenFramebuffersEXT(1, &fbo4); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo4); glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, T, tex[7], 0);
     GLuint fbo2; glGenFramebuffersEXT(1, &fbo2); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo2);
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, T, tex[5], 0);
     if (glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT) { fprintf(stderr, "FBO2 incomplete\n"); return 1; }
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
 
-    GLhandleARB mcp[9], resp, prp; char *src = malloc(16384);
-    for (i = 0; i < 9; i++) { snprintf(src, 16384, "%s%s", mc_common, mc_body[i]); mcp[i] = linkp(src); }
-    resp = linkp(fs_res); prp = linkp(fs_present);
+    GLhandleARB mcp[9], resp, prp, dbp; char *src = malloc(16384);
+    for (i = 0; i < 9; i++) { snprintf(src, 16384, "%s%s", mc_common, mc_body[i]); mcp[i] = linkps(src); }
+    resp = linkps(fs_res); prp = linkp(fs_present); dbp = linkps(fs_deblock);
 
-    float *verts[9]; int nq[9] = {0}; for (i = 0; i < 9; i++) verts[i] = malloc(nbx8 * nby8 * 8 * sizeof(float));
+    GLuint resvbo; glGenBuffers(1, &resvbo); glBindBuffer(GL_ARRAY_BUFFER, resvbo); glBufferData(GL_ARRAY_BUFFER, cq * 2 * sizeof(float), cverts, GL_STATIC_DRAW); glBindBuffer(GL_ARRAY_BUFFER, 0);
+    float *verts[9]; int nq[9] = {0}; for (i = 0; i < 9; i++) verts[i] = malloc(nbx8 * nby8 * 2 * sizeof(float));
     for (y = 0; y < nby8; y++) for (x = 0; x < nbx8; x++) {
-        int c = classify(mvx8[y * nbx8 + x], mvy8[y * nbx8 + x]); float *v = verts[c] + nq[c]++ * 8;
-        float x0 = x * 8, y0 = y * 8; v[0] = x0; v[1] = y0; v[2] = x0 + 8; v[3] = y0; v[4] = x0 + 8; v[5] = y0 + 8; v[6] = x0; v[7] = y0 + 8;
+        int c = classify(mvx8[y * nbx8 + x], mvy8[y * nbx8 + x]); float *v = verts[c] + nq[c]++ * 2;
+        v[0] = x * 8 + 4; v[1] = y * 8 + 4;            /* point sprite of size 8 centred on the 8x8 block */
     }
     printf("MC classes (8x8 blocks):"); for (i = 0; i < 9; i++) printf(" c%d=%d", i, nq[i]); printf("\n");
+    /* ALL point lists live in VBOs, re-uploaded every frame (STREAM_DRAW). Large client-array GL_POINTS draws silently corrupt on this driver (quirk), VBOs are exact. */
+    GLuint vbo_mc[9], vbo_ev, vbo_eh; glGenBuffers(9, vbo_mc); glGenBuffers(1, &vbo_ev); glGenBuffers(1, &vbo_eh);
+    #define VUP(vbo, ptr, n) do { glBindBuffer(GL_ARRAY_BUFFER, (vbo)); glBufferData(GL_ARRAY_BUFFER, (n) * 2 * sizeof(float), (ptr), GL_STREAM_DRAW); } while (0)
+    #define VUSE(vbo) do { glBindBuffer(GL_ARRAY_BUFFER, (vbo)); glVertexPointer(2, GL_FLOAT, 0, (void *)0); } while (0)
 
     #define DRAW_MC() do { \
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo); glViewport(0, 0, W, H); \
         glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[0]); glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[1]); \
-        glEnableClientState(GL_VERTEX_ARRAY); \
+        glEnableClientState(GL_VERTEX_ARRAY); glPointSize(8.0f); \
         for (i = 0; i < 9; i++) if (nq[i]) { \
             glUseProgramObjectARB(mcp[i]); glUniform1iARB(glGetUniformLocationARB(mcp[i], "refTex"), 0); glUniform1iARB(glGetUniformLocationARB(mcp[i], "mvTex"), 1); \
-            glVertexPointer(2, GL_FLOAT, 0, verts[i]); glDrawArrays(GL_QUADS, 0, nq[i] * 4); } \
+            VUSE(vbo_mc[i]); glDrawArrays(GL_POINTS, 0, nq[i]); } glBindBuffer(GL_ARRAY_BUFFER, 0); \
         glDisableClientState(GL_VERTEX_ARRAY); } while (0)
     #define DRAW_COPY() do { \
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo2); glViewport(0, 0, W, H); \
@@ -279,7 +368,17 @@ int main(int argc, char **argv) {
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo2); glViewport(0, 0, W, H); \
         glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[2]); glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[4]); glActiveTexture(GL_TEXTURE2); glBindTexture(T, tex[3]); \
         glUseProgramObjectARB(resp); glUniform1iARB(glGetUniformLocationARB(resp, "coefTex"), 0); glUniform1iARB(glGetUniformLocationARB(resp, "idxTex"), 1); glUniform1iARB(glGetUniformLocationARB(resp, "predTex"), 2); \
-        glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 0, cverts); glDrawArrays(GL_QUADS, 0, cq * 4); glDisableClientState(GL_VERTEX_ARRAY); } while (0)
+        glEnableClientState(GL_VERTEX_ARRAY); glPointSize(4.0f); VUSE(resvbo); { int off_ = 0, chunk_ = getenv("CHUNK") ? atoi(getenv("CHUNK")) : 1 << 30; while (off_ < cq) { int n_ = cq - off_ < chunk_ ? cq - off_ : chunk_; glDrawArrays(GL_POINTS, off_, n_); off_ += n_; } } glBindBuffer(GL_ARRAY_BUFFER, 0); glDisableClientState(GL_VERTEX_ARRAY); } while (0)
+    #define COPYQ() do { glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H); glEnd(); } while (0)
+    #define DRAW_DEBLOCK() do { \
+        /* vertical edges: B(tex5) -> C(tex6) ; horizontal edges: C(tex6) -> D(tex7) */ \
+        glViewport(0, 0, W, H); glUseProgramObjectARB(prp); glUniform1iARB(glGetUniformLocationARB(prp, "finalTex"), 0); \
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo3); glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[5]); COPYQ(); \
+        glUseProgramObjectARB(dbp); glUniform1iARB(glGetUniformLocationARB(dbp, "srcTex"), 0); glUniform1iARB(glGetUniformLocationARB(dbp, "prmTex"), 1); glUniform1fARB(glGetUniformLocationARB(dbp, "dir"), 0.0f); \
+        glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[8]); glEnableClientState(GL_VERTEX_ARRAY); glPointSize(4.0f); VUSE(vbo_ev); glDrawArrays(GL_POINTS, 0, nev); glBindBuffer(GL_ARRAY_BUFFER, 0); \
+        glUseProgramObjectARB(prp); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo4); glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[6]); glDisableClientState(GL_VERTEX_ARRAY); COPYQ(); \
+        glUseProgramObjectARB(dbp); glUniform1fARB(glGetUniformLocationARB(dbp, "dir"), 1.0f); \
+        glActiveTexture(GL_TEXTURE1); glBindTexture(T, tex[9]); glEnableClientState(GL_VERTEX_ARRAY); glPointSize(4.0f); VUSE(vbo_eh); glDrawArrays(GL_POINTS, 0, neh); glBindBuffer(GL_ARRAY_BUFFER, 0); glDisableClientState(GL_VERTEX_ARRAY); } while (0)
     #define DRAW_PRESENT() do { \
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0); glViewport(0, 0, W, H); \
         glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[5]); glUseProgramObjectARB(prp); glUniform1iARB(glGetUniformLocationARB(prp, "finalTex"), 0); \
@@ -288,16 +387,33 @@ int main(int argc, char **argv) {
         glActiveTexture(GL_TEXTURE0); \
         glBindTexture(T, tex[1]); glTexSubImage2D(T, 0, 0, 0, nbx8, nby8, GL_RGBA, GL_FLOAT, mvf); \
         glBindTexture(T, tex[2]); glTexSubImage2D(T, 0, 0, 0, 2048, arows, GL_RGBA, GL_FLOAT, atlas); \
-        glBindTexture(T, tex[4]); glTexSubImage2D(T, 0, 0, 0, nbx4, nby4, GL_LUMINANCE, GL_FLOAT, idxf); } while (0)
+        glBindTexture(T, tex[4]); glTexSubImage2D(T, 0, 0, 0, nbx4, nby4, GL_LUMINANCE, GL_FLOAT, idxf); \
+        { int c_; for (c_ = 0; c_ < 9; c_++) if (nq[c_]) VUP(vbo_mc[c_], verts[c_], nq[c_]); VUP(resvbo, cverts, cq); VUP(vbo_ev, ev, nev); VUP(vbo_eh, eh, neh); glBindBuffer(GL_ARRAY_BUFFER, 0); } } while (0)
 
     /* ---- correctness ---- */
-    DRAW_MC(); DRAW_COPY(); DRAW_RES(); DRAW_PRESENT(); glFinish();
+    UPLOAD(); DRAW_MC(); DRAW_COPY(); DRAW_RES(); DRAW_PRESENT(); glFinish();
     uint8_t *rb = malloc(W * H * 4); glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, rb);
     long bad = 0, bad2 = 0, maxd = 0; long perclass_bad[9] = {0};
     for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
         int d = abs((int)rb[(y * W + x) * 4] - (int)cpu_out[y * W + x]);
         if (d) { bad++; if (d > 1) bad2++; if (d > maxd) maxd = d; perclass_bad[classify(mvx8[(y / 8) * nbx8 + x / 8], mvy8[(y / 8) * nbx8 + x / 8])]++; }
     }
+    { int shown = 0; for (y = 0; y < H && shown < 6; y++) for (x = 0; x < W && shown < 6; x++) if (rb[(y * W + x) * 4] != cpu_out[y * W + x]) { printf("  first mismatches: (%d,%d) gpu=%d cpu=%d class=%d\n", x, y, rb[(y * W + x) * 4], cpu_out[y * W + x], classify(mvx8[(y / 8) * nbx8 + x / 8], mvy8[(y / 8) * nbx8 + x / 8])); shown++; } }
+    { long mc_bad = 0, mc_tot = 0, rs_bad = 0, rs_tot = 0, rowpos[8] = {0}, colpos[8] = {0};
+      for (y = 0; y < H; y++) for (x = 0; x < W; x++) { int coded = idxf[(y / 4) * nbx4 + x / 4] >= 0; int bad1 = rb[(y * W + x) * 4] != cpu_out[y * W + x];
+        if (coded) { rs_tot++; rs_bad += bad1; } else { mc_tot++; mc_bad += bad1; } if (bad1 && !coded) { rowpos[y & 7]++; colpos[x & 7]++; } }
+      printf("  mismatches in UNCODED blocks (pure MC): %ld/%ld ; in CODED blocks (MC+residual): %ld/%ld\n", mc_bad, mc_tot, rs_bad, rs_tot);
+      printf("  uncoded-block mismatches by (y&7):"); for (i = 0; i < 8; i++) printf(" %ld", rowpos[i]); printf(" ; by (x&7):"); for (i = 0; i < 8; i++) printf(" %ld", colpos[i]); printf("\n"); }
+    { long pos[16] = {0}, blkbad = 0, blkall = 0, fullbad = 0; int bi;
+      for (by_ = 0; by_ < nby4; by_++) for (bx_ = 0; bx_ < nbx4; bx_++) if (idxf[by_ * nbx4 + bx_] >= 0) { int nb = 0, kx, ky; blkall++;
+          for (ky = 0; ky < 4; ky++) for (kx = 0; kx < 4; kx++) if (rb[((by_ * 4 + ky) * W + bx_ * 4 + kx) * 4] != cpu_out[(by_ * 4 + ky) * W + bx_ * 4 + kx]) { pos[ky * 4 + kx]++; nb++; }
+          if (nb) blkbad++; if (nb == 16) fullbad++; }
+      printf("  coded blocks with any mismatch: %ld/%ld (all 16 px wrong in %ld); by (y*4+x) in block:", blkbad, blkall, fullbad); for (bi = 0; bi < 16; bi++) printf(" %ld", pos[bi]); printf("\n"); }
+    { long byy[34] = {0}, byx[16] = {0}, byid[8] = {0}; int shown = 0;
+      for (by_ = 0; by_ < nby4; by_++) for (bx_ = 0; bx_ < nbx4; bx_++) if (idxf[by_ * nbx4 + bx_] >= 0) { int nb = 0, kx, ky;
+          for (ky = 0; ky < 4; ky++) for (kx = 0; kx < 4; kx++) if (rb[((by_ * 4 + ky) * W + bx_ * 4 + kx) * 4] != cpu_out[(by_ * 4 + ky) * W + bx_ * 4 + kx]) nb++;
+          if (nb == 16) { int id = (int)idxf[by_ * nbx4 + bx_]; byy[by_ / 8]++; byx[bx_ / 32]++; byid[(id / 4000) & 7]++; if (shown < 8) { printf("  failing block bx=%d by=%d id=%d (atlas row %d col %d)\n", bx_, by_, id, id * 4 / 2048, (id * 4) % 2048); shown++; } } }
+      printf("  fully-wrong blocks by block-row/8:"); for (i = 0; i < 34; i++) printf(" %ld", byy[i]); printf("\n  by block-col/32:"); for (i = 0; i < 15; i++) printf(" %ld", byx[i]); printf("\n  by id/4000:"); for (i = 0; i < 7; i++) printf(" %ld", byid[i]); printf("\n"); }
     printf("VERIFY vs CPU reference: %ld/%d pixels differ (%.4f%%), %ld differ by >1, max diff %ld\n", bad, W * H, 100.0 * bad / (W * H), bad2, maxd);
     printf("  mismatches by MC class:"); for (i = 0; i < 9; i++) printf(" c%d=%ld", i, perclass_bad[i]); printf("\n");
 
@@ -311,6 +427,10 @@ int main(int argc, char **argv) {
         double e = now_ms(); tUp += b - a; tMC += c - b; tRES += d - c; tPR += e - d;
     }
     for (it = 0; it < iters; it++) { double a = now_ms(); UPLOAD(); DRAW_MC(); DRAW_COPY(); DRAW_RES(); DRAW_PRESENT(); glFinish(); tAll += now_ms() - a; }
+    { double tDB = 0, tAll2 = 0;
+      for (it = 0; it < iters; it++) { double a = now_ms(); DRAW_DEBLOCK(); glFinish(); tDB += now_ms() - a; }
+      for (it = 0; it < iters; it++) { double a = now_ms(); UPLOAD(); DRAW_MC(); DRAW_COPY(); DRAW_RES(); DRAW_DEBLOCK(); glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0); glActiveTexture(GL_TEXTURE0); glBindTexture(T, tex[7]); glUseProgramObjectARB(prp); glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H); glEnd(); glFinish(); tAll2 += now_ms() - a; }
+      printf("DEBLOCK (luma, bS<4 stand-in; 2 edge passes + 2 copies): %.2f ms | FULL luma frame incl. deblock + present, single finish: %.2f ms\n", tDB / iters, tAll2 / iters); }
     printf("TIMING (ms/frame, %d iters): upload %.2f | MC %.2f | copy+RES(single pass, coded only) %.2f | present %.2f | sum %.2f | end-to-end single-finish %.2f\n",
            iters, tUp / iters, tMC / iters, tRES / iters, tPR / iters, (tUp + tMC + tRES + tPR) / iters, tAll / iters);
     if (getenv("PROFILE")) {
@@ -323,7 +443,7 @@ int main(int argc, char **argv) {
         for (c = 0; c < 9; c++) if (nq[c]) {
             double a = now_ms(); int r;
             for (r = 0; r < reps; r++) { glUseProgramObjectARB(mcp[c]); glUniform1iARB(glGetUniformLocationARB(mcp[c], "refTex"), 0); glUniform1iARB(glGetUniformLocationARB(mcp[c], "mvTex"), 1);
-                glVertexPointer(2, GL_FLOAT, 0, verts[c]); glDrawArrays(GL_QUADS, 0, nq[c] * 4); glFinish(); }
+                glPointSize(8.0f); VUSE(vbo_mc[c]); glDrawArrays(GL_POINTS, 0, nq[c]); glFinish(); }
             double ms = (now_ms() - a) / reps; printf("  c%d: %.2f ms, %d px, %.1f ns/px\n", c, ms, nq[c] * 64, ms * 1e6 / (nq[c] * 64));
         }
         glDisableClientState(GL_VERTEX_ARRAY);

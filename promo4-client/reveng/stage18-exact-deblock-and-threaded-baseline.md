@@ -29,3 +29,12 @@ Slice threading gives nothing (39 ms: the stream has one slice per picture). Fra
 
 ## Consequence
 The revised goal on #1 (1080p High >= 30 fps bit-exact) is already met on this machine by plain threaded AltiVec decode at 11.9 ms/frame. A GPU pipeline would have to beat ~12 ms/frame with an entropy+deblock floor of ~22 ms single-threaded CPU work per frame that cannot move to the GPU. It cannot win on throughput. The only remaining GPU value is offloading MC+residual to free CPU cores (CPU load, not speed), and that costs more bus traffic than it saves unless deblock is skipped.
+
+## 4. Shared-memory transfer variants (src/xfer_bench2.c, 3.1 MB frame, CPU rewrites the buffer each iteration)
+CPU fill of the buffer alone: 1.97 ms (the deblocker writes this anyway). Upload cost attributable to GL (fill+upload+sampling draw+finish minus fill):
+| variant | ms |
+|---|---|
+| A glTexSubImage2D | 3.46 |
+| B client_storage + texture_range + STORAGE_SHARED, TexSubImage as dirty flag | 3.36 |
+| C same, no TexSubImage (data verified correct) | 3.33 |
+No gain: ~0.9 GB/s either way; the driver still moves the data once. Readback: glReadPixels 6.20 ms; PBO pack+map synchronous 6.58 ms; PBO async: issue 1.03 ms, then the map waits 3.36 ms after 2.0 ms of overlapped CPU work (so ~4.4 ms total, and the issue part is the only non-overlappable cost if enough other work exists).

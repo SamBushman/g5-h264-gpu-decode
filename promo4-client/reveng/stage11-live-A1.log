@@ -1,0 +1,20 @@
+[stage2c] 4 PM4 dwords loaded from A1.hex
+[health:pre] out=(0x810040,0xf7c8000,0x10000000)
+[stage2c] selector 3: 0x0
+[stage2c] map type 0: addr=0x6000 size=0x1000
+[stage2c] map type 1: addr=0x7000 size=0x20000
+[stage2c] map type 2: addr=0x27000 size=0x8000
+[stage2c] map type 4: addr=0x2f000 size=0x1000
+[pre-write header] words@+0x0: 00000000 00000000 00000000 00000000 00007ff8 00000000 00000000 00000001 01000000 80000000 80000000 80000000
+[armed] words@+0x1c: 00000005 c0001000 00000000 c0001000 00000000 00000000 00000000 00000000 00000000 01000000
+[stage2c] triggering submission (re-map of type 1)
+[stage2c] re-map result 0x0 new=0x7000 size=0x20000
+[old buffer after kernel] words@+0x1c: 00000001 01000000 00000000 c0001000 00000000 00000000 00000000 00000000 00000000 01000000
+[stage2c] selector 8 (finish) after 1 tries: 0x0
+[stage2c] unmap type 4: 0xe00002c2
+[stage2c] unmap type 2: 0x0
+[stage2c] unmap type 1: 0x0
+[stage2c] unmap type 0: 0x0
+[stage2c] close: 0x0
+[health:post] out=(0x810040,0xf7c8000,0x10000000)
+[stage2c] post-test health: OK

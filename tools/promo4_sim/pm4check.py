@@ -59,6 +59,7 @@ def reg_check(addr, errors, warnings, where, allow_ps3):
 
 def check(words, allow_ps3=False):
     errors, warnings, shadow = [], [], {}
+    if not words: return ['empty stream'], warnings, shadow
     i, n = 0, len(words)
     while i < n:
         h = words[i]; t = h >> 30; where = 'dw%d(0x%08x)' % (i, h)

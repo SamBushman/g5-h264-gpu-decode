@@ -62,13 +62,28 @@ int main(int argc, char **argv) {
     w0 = now_ms(); c0 = cpu_ms();
     for (r = 0; r < reps; r++) {
         uint32_t before = *stamp; work(); glFlush();
-        long n = 0; while (*stamp == before && n < 20000000) n++;
+        long n = 0; while ((bswap(*stamp) - bswap(before)) < 2 && n < 20000000) n++;   /* each flush retires 2 stamps (preamble + job): observed in TIMELINE */
         if (n >= 20000000) timeouts++;
         spins += n;
     }
     tB = now_ms() - w0; cB = cpu_ms() - c0;
     LOG("[3n] %d reps. A glFinish:            wall %.3f ms/rep, cpu %.3f ms/rep\n", reps, tA / reps, cA / reps);
     LOG("[3n]        B glFlush+poll stamp:  wall %.3f ms/rep, cpu %.3f ms/rep (avg %.0f spins, %ld timeouts), final stamp 0x%x\n", tB / reps, cB / reps, (double)spins / reps, timeouts, bswap(*stamp));
+    if (g_heavy && getenv("TIMELINE")) {   /* time-resolved: when does the stamp change relative to flush return and to actual job completion? */
+        int k;
+        for (k = 0; k < 3; k++) {
+            double t0, tf, t; uint32_t last, v; int nch = 0; double ct[16]; uint32_t cv[16];
+            work(); glFinish();
+            last = *stamp; t0 = now_ms(); work(); glFlush(); tf = now_ms() - t0;
+            while ((t = now_ms() - t0) < 40.0) { v = *stamp; if (v != last && nch < 16) { ct[nch] = t; cv[nch++] = v; last = v; } }
+            double tfin0 = now_ms(); glFinish(); double tfin = now_ms() - tfin0;
+            LOG("[3n] TIMELINE run %d: glFlush returned at %.3f ms; stamp changes at:", k, tf);
+            { int j; for (j = 0; j < nch; j++) LOG(" %.3fms(0x%x)", ct[j], bswap(cv[j])); }
+            LOG("; glFinish issued at 40ms took %.3f ms\n", tfin);
+            /* reference: same job, glFinish immediately */
+            t0 = now_ms(); work(); glFinish(); LOG("[3n]    reference draw+glFinish = %.3f ms\n", now_ms() - t0);
+        }
+    }
     if (g_heavy) {   /* did the stamp move at SUBMIT or at COMPLETION? time one heavy job three ways */
         double t0, t1, t2; uint32_t before;
         work(); glFinish();

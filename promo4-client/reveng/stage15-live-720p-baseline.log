@@ -1,0 +1,47 @@
+Movie has 60 samples (encoded frames)
+Multi-frame continuous decode: hook LIVE, 30 frames...
+  live totals: 2250 intra, 11945 skip (40210 declined), 10177 P_16x16 (31200 declined), 1485 P_16x8/P_8x16 (6092 declined), 294 P_8x8 (1829 declined), 9718 declined to CPU
+  GPU dispatch profile: 3659 flush_pending() calls; lumadc: 2052 calls, 632.2ms total (0.31ms/call); idct_batch: 3679 calls, 2161.2ms total (0.59ms/call); resolve_mc_pending: 3024 calls, 2400.8ms total (0.79ms/call)
+  CPU-time breakdown (getrusage, item 9 investigation): lumadc cpu=425.6ms (67% of its wall); idct_batch cpu=1628.4ms (75% of its wall); resolve_mc_pending cpu=1845.0ms (77% of its wall); TOTAL cpu=3898.9ms / wall=5194.2ms (75%)
+  MC singlepass phase breakdown: pack wall=28.0ms cpu=28.0ms (100%); upload wall=53.8ms cpu=53.9ms (100%); draw+finish wall=597.4ms cpu=597.8ms (100%); readback+unpack wall=1181.0ms cpu=740.0ms (63%); 4242 chunks
+  MC diag-family total: 1141 resolve_mc_pending calls used it, 1141 chunks (MC_BATCH_MAXW cap), wall=377.5ms cpu=262.7ms (70%), 0.33ms/chunk
+  reftex_lookup_or_upload: 5344 hits (wall=13.4ms cpu=13.3ms, 0.003ms/hit); 39 misses (wall=86.8ms cpu=86.8ms, 2.23ms/miss)
+  IDCT batch phase breakdown: pack wall=259.9ms cpu=259.9ms (100%); upload wall=114.7ms cpu=114.7ms (100%); draw+finish wall=416.6ms cpu=416.7ms (100%); readback+unpack wall=979.3ms cpu=446.3ms (46%)
+Multi-frame continuous decode: CPU-only reference, 30 frames...
+
+Per-frame (display order), live-GPU-integrated vs CPU-only reference:
+  frame  0: live=  695.9ms ref=  59.8ms  luma 0/921600 (max 0) chroma 0/460800 (max 0)  0.000% mismatch
+  frame  1: live=  388.6ms ref=  21.1ms  luma 4/921600 (max 4) chroma 0/460800 (max 0)  0.000% mismatch
+  frame  2: live=   19.6ms ref=  16.8ms  luma 18/921600 (max 5) chroma 0/460800 (max 0)  0.001% mismatch
+  frame  3: live=  450.4ms ref=  22.2ms  luma 40/921600 (max 4) chroma 0/460800 (max 0)  0.003% mismatch
+  frame  4: live=   22.2ms ref=  19.7ms  luma 56/921600 (max 5) chroma 0/460800 (max 0)  0.004% mismatch
+  frame  5: live=   19.6ms ref=  16.6ms  luma 255/921600 (max 5) chroma 0/460800 (max 0)  0.018% mismatch
+  frame  6: live=  460.1ms ref=  21.7ms  luma 2097/921600 (max 8) chroma 0/460800 (max 0)  0.152% mismatch
+  frame  7: live=   20.2ms ref=  17.6ms  luma 2478/921600 (max 9) chroma 0/460800 (max 0)  0.179% mismatch
+  frame  8: live=  433.5ms ref=  23.0ms  luma 2343/921600 (max 8) chroma 0/460800 (max 0)  0.169% mismatch
+  frame  9: live=   21.9ms ref=  17.0ms  luma 2895/921600 (max 9) chroma 0/460800 (max 0)  0.209% mismatch
+  frame 10: live=  484.6ms ref=  21.8ms  luma 3185/921600 (max 10) chroma 0/460800 (max 0)  0.230% mismatch
+  frame 11: live=   31.4ms ref=  20.1ms  luma 3318/921600 (max 10) chroma 0/460800 (max 0)  0.240% mismatch
+  frame 12: live=   18.9ms ref=  17.4ms  luma 2184/921600 (max 11) chroma 0/460800 (max 0)  0.158% mismatch
+  frame 13: live=   20.8ms ref=  16.9ms  luma 2656/921600 (max 7) chroma 0/460800 (max 0)  0.192% mismatch
+  frame 14: live=  426.7ms ref=  21.1ms  luma 3467/921600 (max 9) chroma 0/460800 (max 0)  0.251% mismatch
+  frame 15: live=   19.3ms ref=  17.0ms  luma 5321/921600 (max 9) chroma 0/460800 (max 0)  0.385% mismatch
+  frame 16: live=  377.4ms ref=  20.5ms  luma 5167/921600 (max 7) chroma 0/460800 (max 0)  0.374% mismatch
+  frame 17: live=   19.0ms ref=  16.6ms  luma 6442/921600 (max 9) chroma 0/460800 (max 0)  0.466% mismatch
+  frame 18: live=  452.0ms ref=  21.9ms  luma 7857/921600 (max 7) chroma 0/460800 (max 0)  0.568% mismatch
+  frame 19: live=   19.3ms ref=  16.7ms  luma 8357/921600 (max 11) chroma 0/460800 (max 0)  0.605% mismatch
+  frame 20: live=  420.9ms ref=  20.7ms  luma 7819/921600 (max 7) chroma 0/460800 (max 0)  0.566% mismatch
+  frame 21: live=   19.7ms ref=  16.4ms  luma 9036/921600 (max 11) chroma 0/460800 (max 0)  0.654% mismatch
+  frame 22: live=  446.2ms ref=  21.2ms  luma 11140/921600 (max 8) chroma 0/460800 (max 0)  0.806% mismatch
+  frame 23: live=   21.5ms ref=  19.0ms  luma 12292/921600 (max 12) chroma 0/460800 (max 0)  0.889% mismatch
+  frame 24: live=   20.6ms ref=  16.8ms  luma 11589/921600 (max 12) chroma 0/460800 (max 0)  0.838% mismatch
+  frame 25: live=  463.1ms ref=  21.7ms  luma 14574/921600 (max 12) chroma 0/460800 (max 0)  1.054% mismatch  <-- SIGNIFICANT
+  frame 26: live=   21.1ms ref=  17.6ms  luma 15436/921600 (max 10) chroma 0/460800 (max 0)  1.117% mismatch  <-- SIGNIFICANT
+  frame 27: live=  397.4ms ref=  21.2ms  luma 14351/921600 (max 8) chroma 0/460800 (max 0)  1.038% mismatch  <-- SIGNIFICANT
+  frame 28: live=   23.8ms ref=  17.0ms  luma 16784/921600 (max 12) chroma 0/460800 (max 0)  1.214% mismatch  <-- SIGNIFICANT
+  frame 29: live=  490.0ms ref=  22.2ms  luma 18010/921600 (max 9) chroma 0/460800 (max 0)  1.303% mismatch  <-- SIGNIFICANT
+
+Totals over 30 frames: live=6725.8ms (224.2ms/frame avg) ref=619.4ms (20.6ms/frame avg)
+Steady-state (excludes frame 0, which includes GL/shader warm-up): live=207.9ms/frame ref=19.3ms/frame -> GPU is 10.78x slower than CPU
+
+Real-time check (budget=33.3ms/frame, assumed 30fps unless RT_BUDGET_MS set): 16/29 frames (excl. frame 0) met budget (55%) - NOT real-time yet

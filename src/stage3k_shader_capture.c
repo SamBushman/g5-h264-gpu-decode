@@ -2,7 +2,7 @@
  * Binds a GLSL program that samples a 4x4 GL_TEXTURE_RECTANGLE_ARB texture (shader selectable), draws one quad, and saves the live
  * command buffer (base..cursor) BEFORE the flush, so the US_VECTOR_DATA writes (ctx program upload) can be decoded on the host
  * (tools/promo4_sim/decode_us.py). Writes nothing to the command buffer. Also reports the pixel read back.
- * Usage: stage3k-shader-capture VARIANT CAPFILE      VARIANT: 1 = passthrough texture2DRect, 2 = v*2+0.25 (needs ALU), 3 = 4-tap sum
+ * Usage: stage3k-shader-capture VARIANT CAPFILE [FRAGFILE: use this GLSL fragment source instead]       VARIANT: 1 = passthrough texture2DRect, 2 = v*2+0.25 (needs ALU), 3 = 4-tap sum
  */
 #include <AGL/agl.h>
 #include <OpenGL/gl.h>
@@ -37,11 +37,16 @@ int main(int argc, char **argv) {
       "uniform sampler2DRect t; void main(){gl_FragColor=texture2DRect(t,gl_TexCoord[0].xy);}",
       "uniform sampler2DRect t; void main(){gl_FragColor=texture2DRect(t,gl_TexCoord[0].xy)*2.0+vec4(0.25);}",
       "uniform sampler2DRect t; void main(){vec2 p=gl_TexCoord[0].xy; gl_FragColor=(texture2DRect(t,p)+texture2DRect(t,p+vec2(1.0,0.0))+texture2DRect(t,p+vec2(0.0,1.0))+texture2DRect(t,p+vec2(1.0,1.0)))*0.25;}"};
+    static char fbuf[65536];
+    if (argc > 3) { FILE *sf = fopen(argv[3], "r"); size_t nr = sf ? fread(fbuf, 1, sizeof fbuf - 1, sf) : 0; if (sf) fclose(sf); fbuf[nr] = 0; fs[1] = fbuf; variant = 1; if (!nr) { fprintf(stderr, "cannot read %s\n", argv[3]); return 1; } }
     GLhandleARB p = glCreateProgramObjectARB();
     glAttachObjectARB(p, compile(GL_VERTEX_SHADER_ARB, "void main(){gl_Position=gl_ModelViewProjectionMatrix*gl_Vertex; gl_TexCoord[0]=gl_MultiTexCoord0;}"));
     glAttachObjectARB(p, compile(GL_FRAGMENT_SHADER_ARB, fs[variant])); glLinkProgramARB(p);
     GLint ok = 0; glGetObjectParameterivARB(p, GL_OBJECT_LINK_STATUS_ARB, &ok); if (!ok) { fprintf(stderr, "link fail\n"); return 1; }
-    glUseProgramObjectARB(p); glUniform1iARB(glGetUniformLocationARB(p, "t"), 0);
+    glUseProgramObjectARB(p);
+    { const char *nm[] = {"t", "refTex", "coeffTex", "dcTex", "blockInfoTex", "qmulTex", "colInfoTex"}; int ui[] = {0, 0, 0, 0, 1, 1, 2}, k;
+      for (k = 0; k < 7; k++) { GLint loc = glGetUniformLocationARB(p, nm[k]); if (loc >= 0) glUniform1iARB(loc, ui[k]); }
+      for (k = 1; k < 3; k++) { glActiveTexture(GL_TEXTURE0 + k); glBindTexture(GL_TEXTURE_RECTANGLE_ARB, t); } glActiveTexture(GL_TEXTURE0); }
     glClearColor(0, 0, 0, 0); glClear(GL_COLOR_BUFFER_BIT);
     glBegin(GL_QUADS);
     glMultiTexCoord2f(GL_TEXTURE0, 0, 0); glVertex2f(0, 0); glMultiTexCoord2f(GL_TEXTURE0, 4, 0); glVertex2f(4, 0);
